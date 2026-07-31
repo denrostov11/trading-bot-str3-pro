@@ -1,0 +1,15 @@
+variant_id,basis,zusatzfilter,filter_details,break_even,zweck,volumen_noetig,status
+Str.3 Pro.1,Baseline,keiner,reine bereinigte Basisstrategie,BE-0,Kontroll-Baseline (kein Nachziehen),nein,AKTIV-Kontrolle (freigegeben Praez.11)
+Str.3 Pro.1,Baseline,keiner,reine bereinigte Basisstrategie,BE-1,Kontrollvergleich mit Prozent-BE (0.3%/1.0%),nein,AKTIV-Kontrolle (freigegeben Praez.11)
+Str.3 Pro.2,Baseline,Daily-EMA200-Richtung,LONG nur Daily-Close>EMA200; SHORT nur <; >=250 gueltige Tageskerzen; letzte abgeschl. Tageskerze,BE-1,Richtungsfilter,nein,VORSCHLAG (Freigabe noetig)
+Str.3 Pro.3,Baseline,Relatives Volumen,RVOL=Vol Bruchkerze / Median(20 vergleichbare 4h); pass bei RVOL>=1.20; sonst VOLUME_NOT_AVAILABLE,BE-1,Volumenbestaetigung,ja,VORSCHLAG (Freigabe noetig)
+Str.3 Pro.4,Baseline,ATR-Regime,ATR(14)% Perzentil vs letzte 100 4h; akzeptiere 20.-90. Perzentil; Perzentil protokollieren,BE-1,Volatilitaetsregime,nein,VORSCHLAG (Freigabe noetig)
+Str.3 Pro.5,Baseline,EMA200+RVOL+ATR-Regime,Kombination Pro.2+Pro.3+Pro.4; ohne Volumen: COMBINED_NOT_EVALUABLE,BE-1,Kombifilter,ja,VORSCHLAG (Freigabe noetig)
+Str.3 Pro.6,Baseline,Breakout-Kerzenqualitaet,Body/Range>=0.50; LONG Close oberes 25%; SHORT unteres 25%; Range 0.80-2.50 ATR,BE-1,Ausbruchsqualitaet,nein,VORSCHLAG (Freigabe noetig)
+Str.3 Pro.7,Baseline,Trendqualitaet,ADX(14)+Choppiness(14)+R2(30) protokollieren; keine Auto-Schwellen,BE-1,Diagnostik,nein,DIAGNOSTIC_ONLY (Praez.9)
+Str.3 Pro.8,Baseline,Daily-Marktstruktur,LONG nur pos. Daily-Struktur; SHORT nur neg.; algorithmisch zu definieren,BE-1,Mehrzeitebenen,nein,PRO8_NOT_CONFIGURED (Praez.10)
+BE-0,BreakEven-Modus,kein Nachziehen,Stop bleibt initial,,Kontrolle,,definiert
+BE-1,BreakEven-Modus,Prozent-Klassenregel,0.3% FX/Indizes; 1.0% andere; Puffer 10% der Schwelle,,bisherige Regel,,definiert
+BE-2,BreakEven-Modus,+0.75R,Stop in geschuetzten Bereich nach +0.75R,,Schwelle 0.75R,,definiert
+BE-3,BreakEven-Modus,+1.0R,Stop in geschuetzten Bereich nach +1.0R,,Schwelle 1.0R,,definiert
+BE-4,BreakEven-Modus,+1.0 ATR,Stop in geschuetzten Bereich nach +1.0 ATR,,Schwelle 1.0 ATR,,definiert

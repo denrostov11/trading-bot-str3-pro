@@ -1,0 +1,64 @@
+# =====================================================================
+#  GEHEIMNISSE — NIEMALS committen (Token, Chat-IDs, User-IDs)
+# =====================================================================
+.env
+*.env
+**/.env
+!.env.example
+**/.env.example
+
+# =====================================================================
+#  Python
+# =====================================================================
+venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+
+# =====================================================================
+#  Laufzeit-Zustand (lokale verbindliche Quelle — gehoert NICHT ins Repo)
+# =====================================================================
+paper_runtime*/
+**/paper_runtime*/
+**/data_cache/
+*.lock
+notify_queue.json
+state.json
+trades.json
+ledger.json
+processed.json
+bot_config.json
+last_cycle_monitor.json
+START_MANIFEST.json
+STOP
+*_log.txt
+*.log
+
+# =====================================================================
+#  Generierte Artefakte / Berichte / Backups (gross, reproduzierbar)
+# =====================================================================
+*.png
+*.pdf
+*.docx
+*.pptx
+*.zip
+Backup/Archiv/
+
+# Ausgabe-Ordner des Scanners/Alerts (nur generierte Bilder & Rankings)
+Alerts/
+Trades/
+Watchlist/
+Scan_100/
+Str.3 Pro.1/
+
+# =====================================================================
+#  Betriebssystem / Editor
+# =====================================================================
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/

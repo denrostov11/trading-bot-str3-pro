@@ -1,0 +1,17 @@
+{
+ "bars": 1414,
+ "n_support": 166,
+ "n_resistance": 187,
+ "top_support": {
+  "taps": 9,
+  "angle": 22.2,
+  "breaking_bar": 1092,
+  "aplus": true
+ },
+ "top_resistance": {
+  "taps": 8,
+  "angle": 15.5,
+  "breaking_bar": -1,
+  "aplus": true
+ }
+}

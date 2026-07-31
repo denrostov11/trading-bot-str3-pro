@@ -1,0 +1,3 @@
+symbol,name,asset_class,exchange,exchange_timezone,currency,regular_session,extended_hours_allowed,futures_or_spot,expected_volume_quality,intraday_available,daily_available,first_valid_timestamp,last_valid_timestamp,number_of_1h_bars,number_of_4h_bars,number_of_15m_bars,missing_bar_ratio,duplicate_count,zero_volume_ratio,last_data_quality_status,suspected_rollover_dates,enabled,disable_reason
+# Wird ab Phase C automatisch je Symbol befuellt. Startuniversum ~95 (aus INSTRUMENTS in scan_100.py).
+# Deaktiviert (keine freie Quelle): Nickel,Zink,Blei,Eisenerz,Propan,LNG -> enabled=false
