@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Str.3 Pro Viewer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <h1>Str.3 Pro</h1>
+            <p>Paper-trading chart viewer</p>
+          </div>
+        </div>
+
+        <label>
+          Runtime
+          <select id="runtimeSelect"></select>
+        </label>
+
+        <label>
+          Symbol
+          <select id="symbolSelect"></select>
+        </label>
+
+        <div class="metric-grid">
+          <div>
+            <span>Bars</span>
+            <strong id="barsMetric">-</strong>
+          </div>
+          <div>
+            <span>Signals</span>
+            <strong id="signalsMetric">-</strong>
+          </div>
+          <div>
+            <span>Trades</span>
+            <strong id="tradesMetric">-</strong>
+          </div>
+          <div>
+            <span>Errors</span>
+            <strong id="errorsMetric">-</strong>
+          </div>
+        </div>
+
+        <section>
+          <h2>Candidates</h2>
+          <div id="candidateList" class="list"></div>
+        </section>
+
+        <section>
+          <h2>Trades</h2>
+          <div id="tradeList" class="list"></div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <h2 id="chartTitle">Loading...</h2>
+            <p id="chartSubtitle">Local runtime data</p>
+          </div>
+          <button id="refreshButton" type="button" title="Refresh chart">Refresh</button>
+        </header>
+        <div id="chart"></div>
+        <footer class="footer">
+          <span class="legend-item action"></span> Action line
+          <span class="legend-item safety"></span> Safety line
+          <span class="legend-item signal"></span> Signal
+        </footer>
+      </section>
+    </main>
+
+    <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
