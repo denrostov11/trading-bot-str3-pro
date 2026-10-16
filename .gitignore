@@ -62,3 +62,21 @@ desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# =====================================================================
+#  Ergänzt 16.10.2026: Daten, Caches, Laufzeit, Arbeitskopie
+# =====================================================================
+backtest_runtime/
+**/backtest_runtime/
+mtf_cache/
+**/mtf_cache/
+report_listener_runtime/
+**/report_listener_runtime/
+Sicherungen/
+Prototyp_v2/
+**/daten_kopie/
+Analysen/**/*.csv
+Analysen/**/*.json
+Analysen/**/*.jsonl
+Analysen/**/*.txt
+Backtest_01.2025-06.2026/

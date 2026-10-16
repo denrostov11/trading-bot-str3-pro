@@ -42,9 +42,28 @@ STUFE1_SYMS = [
 ]
 ACTIVE_VARIANTS = [f"Str.3 Pro.{i}" for i in range(1, 9)]
 
+# Wird von run() je Stufe gesetzt (STUFE 1 = 24 Symbole; STUFE 2 = volles Universum ~94).
+ACTIVE_SYMS = list(STUFE1_SYMS)
+
+
+def _stufe2_syms():
+    from engine.instruments import load_universe
+    return [(x["name"], x["symbol"]) for x in load_universe()]
+
+
+def _add_months(dt, months):
+    """Kalendergenaues Monatsaddieren (2 Kalendermonate = z. B. 17.08.->17.10.). Bei kuerzerem
+    Zielmonat wird auf den letzten gueltigen Tag geklemmt (z. B. 31.12.+2M -> 28./29.02.)."""
+    import calendar
+    m = dt.month - 1 + months
+    y = dt.year + m // 12
+    m = m % 12 + 1
+    d = min(dt.day, calendar.monthrange(y, m)[1])
+    return dt.replace(year=y, month=m, day=d)
+
 
 def _universe():
-    return [dict(name=n, symbol=s, **classify(s)) for n, s in STUFE1_SYMS]
+    return [dict(name=n, symbol=s, **classify(s)) for n, s in ACTIVE_SYMS]
 
 
 def _config_hash(cfg):
@@ -52,7 +71,10 @@ def _config_hash(cfg):
     return "C" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:15]
 
 
-def run(stage="STUFE 1", official_start=None, stage_days=3, base_dir=None):
+def run(stage="STUFE 1", official_start=None, stage_days=3, base_dir=None, syms=None):
+    global ACTIVE_SYMS
+    if syms is not None:
+        ACTIVE_SYMS = list(syms)
     base = base_dir or os.path.join(_PROTO, "paper_runtime_stufe1")
     os.makedirs(base, exist_ok=True)
     stop_file = os.path.join(base, "STOP")
@@ -73,12 +95,14 @@ def run(stage="STUFE 1", official_start=None, stage_days=3, base_dir=None):
         _lock = None                     # Nicht-Windows: keine Sperre
 
     resume = False
+    man_stage_end = None
     if os.path.exists(manifest_path):
         # Neustart-Wiederaufnahme: Fenster aus dem unveraenderlichen Manifest lesen (nicht verschieben!)
         try:
             man = json.load(open(manifest_path, encoding="utf-8"))
             official_start = datetime.fromisoformat(man["start_local"])
             stage = man.get("stage", stage)
+            man_stage_end = man.get("stage_end_local")   # festes Ende aus dem Manifest (kein Drift bei Resume)
             resume = True
             print(f"[{now}] Wiederaufnahme aus Manifest: Start {official_start}, Stufe {stage}.")
         except Exception:
@@ -94,11 +118,13 @@ def run(stage="STUFE 1", official_start=None, stage_days=3, base_dir=None):
         time.sleep(min(60, (official_start - datetime.now(TZ)).total_seconds()))
 
     start_ts = datetime.now(TZ)
-    stage_end = official_start + timedelta(days=stage_days)
+    # Bei Resume das UNVERAENDERLICHE Ende aus dem Manifest nehmen; sonst aus Start + stage_days.
+    stage_end = datetime.fromisoformat(man_stage_end) if (resume and man_stage_end) \
+        else official_start + timedelta(days=stage_days)
     cfg = {"stage": stage, "start_local": official_start.isoformat(),
            "start_utc": official_start.astimezone(ZoneInfo("UTC")).isoformat(),
            "stage_end_local": stage_end.isoformat(), "code_version": CODE_VERSION,
-           "universe": [s for _, s in STUFE1_SYMS], "active_variants": ACTIVE_VARIANTS,
+           "universe": [s for _, s in ACTIVE_SYMS], "active_variants": ACTIVE_VARIANTS,
            "cycle_seconds": CYCLE_SECONDS, "report_timezone": "Europe/Berlin",
            "real_orders": False, "telegram": "nur Ausgabe", "percent_only": True}
     cfg["config_hash"] = _config_hash(cfg)
@@ -114,7 +140,7 @@ def run(stage="STUFE 1", official_start=None, stage_days=3, base_dir=None):
             msg = (f"🟢 {stage} GESTARTET (Paper-Trading, keine echte Order)\n"
                    f"Start: {official_start.strftime('%d.%m.%Y %H:%M')} Europe/Berlin\n"
                    f"Stufe-Ende geplant: {stage_end.strftime('%d.%m.%Y %H:%M')}\n"
-                   f"Instrumente: {len(STUFE1_SYMS)} · Varianten: Pro.1–8\n"
+                   f"Instrumente: {len(ACTIVE_SYMS)} · Varianten: Pro.1–8\n"
                    f"code_version {CODE_VERSION} · config_hash {cfg['config_hash']}\n"
                    f"Telegram nur Ausgabe. Lokale DB ist verbindliche Quelle.")
             svc.system(msg)
@@ -169,8 +195,34 @@ if __name__ == "__main__":
     ap.add_argument("--stage-days", type=int, default=3)
     ap.add_argument("--start-now", action="store_true",
                     help="offizieller Start = jetzt (kein Warten auf 21:00; nur beim Erststart wirksam)")
+    ap.add_argument("--stage2", action="store_true",
+                    help="STUFE 2: volles Universum (~94), eigenes Runtime-Verzeichnis, 7 Tage default")
+    ap.add_argument("--zwei-monate", action="store_true", dest="zwei_monate",
+                    help="ZWEI-MONATS-TEST: volles Universum (~94), Start HEUTE 12:00 Europe/Berlin, "
+                         "2 Kalendermonate, eigenes Runtime-Verzeichnis, neustart-fest")
     args = ap.parse_args()
-    if args.once:
+    if args.zwei_monate:
+        base = os.path.join(_PROTO, "paper_runtime_2monate")
+        ACTIVE_SYMS = _stufe2_syms()
+        now0 = datetime.now(TZ)
+        start = now0.replace(hour=12, minute=0, second=0, microsecond=0)   # heute 12:00 Berlin
+        end = _add_months(start, 2)                                        # 2 Kalendermonate
+        days = (end - start).days
+        run(stage="ZWEI-MONATS-TEST", official_start=start, stage_days=days, base_dir=base,
+            syms=ACTIVE_SYMS)
+    elif args.stage2:
+        base = os.path.join(_PROTO, "paper_runtime_stufe2")
+        ACTIVE_SYMS = _stufe2_syms()
+        if args.once:
+            os.makedirs(base, exist_ok=True)
+            m = run_paper.run_once(universe=_universe(), base_dir=base, telegram=True)
+            print("STUFE2 TEST-ZYKLUS:", json.dumps({k: m[k] for k in ("instruments","no_trigger",
+                  "opened","closed","errors","telegram")}, ensure_ascii=False))
+        else:
+            start = datetime.now(TZ) if args.start_now else None
+            days = args.stage_days if args.stage_days != 3 else 7
+            run(stage="STUFE 2", official_start=start, stage_days=days, base_dir=base, syms=ACTIVE_SYMS)
+    elif args.once:
         base = os.path.join(_PROTO, "paper_runtime_stufe1")
         os.makedirs(base, exist_ok=True)
         m = run_paper.run_once(universe=_universe(), base_dir=base, telegram=True)

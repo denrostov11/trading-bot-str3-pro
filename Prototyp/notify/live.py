@@ -88,11 +88,14 @@ class TelegramService:
         self._flush()
         return r
 
-    def trade_opened(self, t):
+    def trade_opened(self, t, chart_path=None):
         body = (f"{t.direction} · Einstieg geplant (Open nächste Kerze)\n"
                 f"Stop: {t.stop_initial} · Ziel: {t.target}\nparent_signal_id: {t.parent_signal_id}")
-        self.send(M.Message(t.strategy_id, "v1", M.TRADE_OPENED, symbol=t.symbol,
-                            trade_id=t.trade_id, parent_signal_id=t.parent_signal_id, body=body))
+        m = M.Message(t.strategy_id, "v1", M.TRADE_OPENED, symbol=t.symbol,
+                      trade_id=t.trade_id, parent_signal_id=t.parent_signal_id, body=body)
+        if chart_path:
+            m.document_path = chart_path      # Chart mit eingezeichneten Kriterien als Bild
+        self.send(m)
 
     def trade_closed(self, t):
         r = t.result

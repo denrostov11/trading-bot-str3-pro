@@ -145,7 +145,9 @@ def _evaluate_candle(name, symbol, asset_class, is_futures, active_variants, led
             "baseline_target": snap.baseline_target, "baseline_rr": snap.baseline_rr,
             "action_sig": action_sig,
             "variants": {d.strategy_id: d.status for d in decs},
-            "variant_decisions": decs, "diagnostics": res.diagnostics, "compat": compat}
+            "variant_decisions": decs, "diagnostics": res.diagnostics, "compat": compat,
+            # Linien-Objekte fuer die Chart-Darstellung (in-memory; werden NICHT serialisiert):
+            "action_obj": det["action"], "safety_obj": det["safety"]}
 
 
 def analyze_instrument(name, symbol, asset_class, is_futures, active_variants, ledger,
@@ -163,10 +165,21 @@ def analyze_instrument(name, symbol, asset_class, is_futures, active_variants, l
                             fin, now.isoformat(), config_params, detect_fn, daily_df, log)
 
 
+def _decision_times(fin, open_times):
+    """Ende jeder finalen 4h-Kerze (UTC) = Zeitpunkt, zu dem ihre Bewertung entschieden wird.
+    Nutzt die end_utc-Spalte der Aggregation; Fallback: Kerzenbeginn + 4 h."""
+    if "end_utc" in fin.columns:
+        ends = pd.to_datetime(fin["end_utc"], utc=True).reset_index(drop=True)
+        if len(ends) == len(open_times) and not ends.isna().any():
+            return ends
+    return (open_times + pd.Timedelta(hours=4)).reset_index(drop=True)
+
+
 def analyze_instrument_history(name, symbol, asset_class, is_futures, active_variants, ledger,
                                since_time=None, downloader=None, cache=None, detect_fn=None,
                                daily_df=None, anchor_hour=0, session_hours=None, now=None,
-                               config_params=None, log=None, max_replay=200):
+                               config_params=None, log=None, max_replay=200, daily_asof_fn=None,
+                               lookback_bars=None):
     """Wie analyze_instrument, aber holt LUECKEN nach (PC war zwischenzeitlich aus): bewertet jede
     seit `since_time` NEU abgeschlossene 4h-Kerze der Reihe nach als eigenes 'letzte-Kerze'-Fenster.
     Kein Look-ahead: jede Bewertung sieht nur Daten bis zu IHRER Kerze (Datenschnitt = Folgekerzen-Open).
@@ -193,6 +206,8 @@ def analyze_instrument_history(name, symbol, asset_class, is_futures, active_var
         start_k = n - 1                      # Erststart: nur die aktuelle Kerze
     else:
         st = pd.Timestamp(since_time)
+        if st.tzinfo is None:                # defensiv: naive Zeit als UTC deuten (kein tz-Vergleichsfehler)
+            st = st.tz_localize("UTC")
         newer = times.index[times > st]
         start_k = int(newer[0]) if len(newer) else n   # n => keine neue Kerze
     start_k = max(start_k, MIN_FINAL_BARS - 1)          # genug Historie fuer die Erkennung
@@ -202,12 +217,28 @@ def analyze_instrument_history(name, symbol, asset_class, is_futures, active_var
         if log is not None:
             log.append(f"{symbol}: Luecke > {max_replay} Kerzen - {skipped} aelteste ausgelassen")
 
+    # Entscheidungszeitpunkte (Kerzenende) nur fuer den Backtest-Pfad mit daily_asof_fn -
+    # der Live-Pfad (ohne daily_asof_fn) bleibt vollstaendig unveraendert.
+    decision_times = _decision_times(fin, times) if daily_asof_fn is not None else None
+
     results = []
     for k in range(start_k, n):
         cutoff_iso = times.iloc[k + 1].isoformat() if k + 1 < n else now.isoformat()
+        # Daily look-ahead-frei je Kerze (Backtest): nur bis zur aktuellen Kerze abgeschlossene
+        # Tageskerzen. Ohne daily_asof_fn (Live-Pfad) bleibt daily_df unveraendert (i. d. R. None).
+        daily_slice = daily_df
+        if daily_df is not None and daily_asof_fn is not None:
+            # Entscheidungszeitpunkt ist das ENDE der 4h-Kerze, nicht ihr Beginn: eine Tageskerze,
+            # die waehrend dieser 4h-Kerze schliesst (z. B. Krypto 20-24 Uhr UTC), ist zum
+            # Entscheidungszeitpunkt bereits bekannt. Mit dem Kerzenbeginn fehlte sie (1 Tag zu alt).
+            daily_slice = daily_asof_fn(daily_df, decision_times.iloc[k])
+        # Erkennungsfenster begrenzen (Backtest): eine A+-Linie ist ohnehin nur ueber <=3-4 Monate
+        # gueltig -> nur die letzten lookback_bars Kerzen betrachten. Macht den Lauf machbar
+        # (volle Historie waere >150s/Erkennung) und aendert gueltige Setups nicht. lo=0 = Live-Verhalten.
+        lo = max(0, k + 1 - lookback_bars) if lookback_bars else 0
         results.append(_evaluate_candle(name, symbol, asset_class, is_futures, active_variants,
-                                        ledger, fin.iloc[:k + 1], cutoff_iso, config_params,
-                                        detect_fn, daily_df, log))
+                                        ledger, fin.iloc[lo:k + 1], cutoff_iso, config_params,
+                                        detect_fn, daily_slice, log))
     newest_time = times.iloc[n - 1].isoformat()
     return results, full_compat, newest_time
 

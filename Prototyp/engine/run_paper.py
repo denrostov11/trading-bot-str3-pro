@@ -98,8 +98,29 @@ def run_once(universe=None, base_dir=None, now=None, log=None, config_params=Non
             from notify.live import TelegramService
             svc = TelegramService(ACTIVE_VARIANTS)
             if svc.enabled:
+                from engine import trade_chart as TC
+                # parent_signal_id -> akzeptiertes Ergebnis (traegt Linien-Objekte + compat fuer den Chart)
+                res_by_psig = {}
+                for rlist in results_by_symbol.values():
+                    for r in rlist:
+                        res_by_psig[r.get("parent_signal_id")] = r
+                chart_dir = os.path.join(rt, "charts"); os.makedirs(chart_dir, exist_ok=True)
+                chart_cache = {}                          # 1 Chart je Setup (alle Varianten teilen es)
                 for t in cyc.get("opened_trades", []):
-                    svc.trade_opened(t)
+                    if t.parent_signal_id not in chart_cache:
+                        cpath = None
+                        r = res_by_psig.get(t.parent_signal_id)
+                        if r is not None and r.get("action_obj") is not None and r.get("compat") is not None:
+                            try:
+                                cpath = TC.render_trade_chart(
+                                    r["compat"], t.symbol, t.symbol, r.get("action_obj"),
+                                    r.get("safety_obj"), t.direction, r.get("signal_close", t.stop_initial),
+                                    t.stop_initial, t.target,
+                                    os.path.join(chart_dir, f"{t.parent_signal_id}.png"), variant="Str.3 Pro")
+                            except Exception as e:
+                                log.append(f"Chart {t.symbol}: {type(e).__name__}")
+                        chart_cache[t.parent_signal_id] = cpath
+                    svc.trade_opened(t, chart_path=chart_cache[t.parent_signal_id])
                 for t in cyc.get("closed_trades", []):
                     svc.trade_closed(t)
                 # System-Monitor nur bei Aktivität/Fehlern (kein stündlicher Spam)
