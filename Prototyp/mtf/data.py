@@ -11,15 +11,41 @@ Regeln
   wird NICHT fuer die Linienerkennung benutzt (konsistent zur Engine: nur finale Kerzen), aber als "unfertige"
   Kerze aus den 1h-Daten bis zum cutoff gebaut und hell dargestellt - so sieht man, wo der Kurs gerade steht,
   ohne dass eine nicht abgeschlossene Kerze Linien oder Bruchsignale beeinflusst.
-Nur lesender Zugriff auf Laufdaten; geschrieben wird ausschliesslich in mtf_cache/.
+Nur lesender Zugriff auf Laufdaten; geschrieben wird ausschliesslich in den Cache-Ordner.
+
+Cache-Ordner (konfigurierbar): Umgebungsvariable MTF_CACHE_DIR, zur Laufzeit set_cache_dir(pfad) oder Argument cache_dir;
+Standard Prototyp_v2/mtf_cache. Eingefrorene Backtest-Tagesdaten (Fallback): MTF_FROZEN_DIR bzw. Prototyp_v2/backtest_runtime/frozen.
+Fehlende Daten fuehren NIE zu einer Ausnahme in build_timeframes: der betroffene Zeitrahmen ist dann leer ("keine Daten" im Chart).
 """
 import os
+import time
 import pandas as pd
 
 PROTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MTF_CACHE = os.path.join(PROTO, "mtf_cache")
-FROZEN_DIR = os.path.join(PROTO, "backtest_runtime", "frozen")
+MTF_CACHE = os.environ.get("MTF_CACHE_DIR") or os.path.join(PROTO, "mtf_cache")
+FROZEN_DIR = os.environ.get("MTF_FROZEN_DIR") or os.path.join(PROTO, "backtest_runtime", "frozen")
 COLS = ["Time", "Open", "High", "Low", "Close", "Volume", "End"]
+FETCH_RETRY_HOURS = 6.0       # nach fehlgeschlagenem Yahoo-Abruf fuer diesen Zeitraum NICHT erneut anfragen
+
+
+def set_cache_dir(path):
+    """Cache-Ordner zur Laufzeit umstellen (z. B. aus der Bot-Konfiguration)."""
+    global MTF_CACHE
+    MTF_CACHE = str(path)
+    return MTF_CACHE
+
+
+def empty_frame():
+    """Leerer Kerzen-DataFrame mit den Standardspalten (Zeitspalten UTC)."""
+    d = pd.DataFrame({"Time": pd.Series([], dtype="datetime64[ns, UTC]"), "Open": pd.Series([], dtype=float),
+                      "High": pd.Series([], dtype=float), "Low": pd.Series([], dtype=float),
+                      "Close": pd.Series([], dtype=float), "Volume": pd.Series([], dtype=float),
+                      "End": pd.Series([], dtype="datetime64[ns, UTC]")})
+    return d[COLS]
+
+
+def is_empty(df):
+    return df is None or len(df) == 0
 
 
 def safe(sym):
@@ -39,6 +65,25 @@ def with_end(df, delta):
         d["Volume"] = 0.0
     d["End"] = d["Time"] + delta
     return d[COLS].reset_index(drop=True)
+
+
+def prepare(df, delta):
+    """Kerzen-DataFrame aus beliebiger Quelle normalisieren: Spalte Time (UTC) – notfalls aus dem Index –, sortiert, ohne
+    Duplikate, mit Volume und End (= Time + delta). None/leer -> leerer Rahmen."""
+    if is_empty(df):
+        return empty_frame()
+    d = df.copy()
+    if "Time" not in d.columns:
+        d = d.reset_index()
+        d = d.rename(columns={d.columns[0]: "Time"})
+    d["Time"] = pd.to_datetime(d["Time"], utc=True)
+    d = d.sort_values("Time").drop_duplicates("Time")
+    if "End" in d.columns:
+        d["End"] = pd.to_datetime(d["End"], utc=True)
+        if "Volume" not in d.columns:
+            d["Volume"] = 0.0
+        return d[COLS].reset_index(drop=True)
+    return with_end(d, delta)
 
 
 def load_1h(path):
@@ -75,15 +120,50 @@ def fetch_daily_max(symbol, fetch_fn=None):
         return None
 
 
-def load_daily(symbol, h1=None, cache_dir=MTF_CACHE, frozen_dir=FROZEN_DIR, allow_fetch=True, fetch_fn=None):
-    """Tageskerzen (mit End). Reihenfolge: mtf_cache -> einmaliger Yahoo-Abruf (in mtf_cache) ->
-    Fallback eingefrorene Backtest-Tagesdaten (+ aus 1h gebaute spaetere Tage). Gibt (df, quelle)."""
+def _fail_marker(path):
+    return path + ".failed"
+
+
+def _recently_failed(path):
+    m = _fail_marker(path)
+    try:
+        return (time.time() - os.path.getmtime(m)) < FETCH_RETRY_HOURS * 3600
+    except OSError:
+        return False
+
+
+def _mark_failed(path):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(_fail_marker(path), "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def _extend_with_1h(d, h1):
+    """Tage NACH dem Ende der Tagesreihe aus 1h-Kerzen ergaenzen (Cache kann aelter sein als die 1h-Daten)."""
+    if h1 is None or not len(h1) or not len(d):
+        return d
+    more = daily_from_1h(h1, after=d["End"].iloc[-1])
+    return pd.concat([d, more], ignore_index=True) if len(more) else d
+
+
+def load_daily(symbol, h1=None, cache_dir=None, frozen_dir=None, allow_fetch=True, fetch_fn=None):
+    """Tageskerzen (mit End). Reihenfolge: Cache -> einmaliger Yahoo-Abruf (in den Cache; nach Fehlschlag 6 h keine neue
+    Anfrage) -> Fallback eingefrorene Backtest-Tagesdaten -> aus 1h gebaute Tage (kurze Historie). Spaetere Tage, die in der
+    Tagesreihe fehlen, werden aus den 1h-Daten ergaenzt. Gibt (df, quelle); df=None, wenn nichts verfuegbar."""
+    cache_dir = cache_dir or MTF_CACHE
+    frozen_dir = frozen_dir or FROZEN_DIR
     path = os.path.join(cache_dir, f"{safe(symbol)}__1d.csv")
     if os.path.exists(path):
-        d = pd.read_csv(path)
-        d["Time"] = pd.to_datetime(d["Time"], utc=True)
-        return with_end(d, pd.Timedelta(days=1)), "mtf_cache"
-    if allow_fetch:
+        try:
+            d = pd.read_csv(path)
+            d["Time"] = pd.to_datetime(d["Time"], utc=True)
+            return _extend_with_1h(with_end(d, pd.Timedelta(days=1)), h1), "mtf_cache"
+        except Exception:
+            pass                                          # kaputte Cache-Datei: wie nicht vorhanden behandeln
+    if allow_fetch and not _recently_failed(path):
         raw = fetch_daily_max(symbol, fetch_fn)
         if raw is not None and len(raw) > 100:
             d = normalize_daily(raw)[["Time", "Open", "High", "Low", "Close", "Volume"]]
@@ -91,27 +171,36 @@ def load_daily(symbol, h1=None, cache_dir=MTF_CACHE, frozen_dir=FROZEN_DIR, allo
             tmp = path + ".tmp"
             d.to_csv(tmp, index=False)
             os.replace(tmp, path)
-            return with_end(d, pd.Timedelta(days=1)), "yahoo_max"
+            return _extend_with_1h(with_end(d, pd.Timedelta(days=1)), h1), "yahoo_max"
+        _mark_failed(path)                                # KEIN Wiederholen (Yahoo sparsam nutzen)
     fz = os.path.join(frozen_dir, f"{safe(symbol)}_1d.csv")
     if os.path.exists(fz):
         d = pd.read_csv(fz)
         d["Time"] = pd.to_datetime(d["Time"], utc=True)
         d = with_end(normalize_daily(d), pd.Timedelta(days=1))
-        if h1 is not None and len(h1):                # spaetere Tage aus 1h ergaenzen
-            more = daily_from_1h(h1, after=d["End"].iloc[-1])
-            d = pd.concat([d, more], ignore_index=True)
-        return d, "eingefroren(+1h)"
+        return _extend_with_1h(d, h1), "eingefroren(+1h)"
+    if h1 is not None and len(h1):
+        d = daily_from_1h(h1)
+        if len(d):
+            return d, "aus 1h gebaut (kurze Historie)"
     return None, "keine"
 
 
 def daily_from_1h(h1, after=None):
+    """Tageskerzen (UTC-Kalendertag) aus 1h-Kerzen; nur (fast) vollstaendige Tage. after: erst Tage ab diesem Zeitpunkt."""
+    if h1 is None or not len(h1):
+        return empty_frame()
     d = h1.copy()
     d["Day"] = d["Time"].dt.normalize()
-    if after is not None:
-        d = d[d["Day"] >= after]
     g = d.groupby("Day").agg(Open=("Open", "first"), High=("High", "max"), Low=("Low", "min"),
                              Close=("Close", "last"), Volume=("Volume", "sum"), n=("Open", "size")).reset_index()
-    g = g[g["n"] >= 20].rename(columns={"Day": "Time"})     # nur (fast) vollstaendige Tage
+    full = max(3.0, 0.6 * float(g["n"].median()))            # Aktien: ~7 1h-Kerzen je Tag, FX/Krypto: 24
+    g = g[g["n"] >= full]
+    if after is not None:
+        g = g[g["Day"] >= after]
+    if not len(g):
+        return empty_frame()
+    g = g.rename(columns={"Day": "Time"})
     return with_end(g[["Time", "Open", "High", "Low", "Close", "Volume"]], pd.Timedelta(days=1))
 
 
@@ -173,25 +262,43 @@ def partial_candle(h1, tf, cutoff):
 
 def four_hour(h1_raw, cutoff):
     """4h aus 1h ueber die Engine-Aggregation (Anker 00:00 UTC), nur finale Kerzen bis cutoff."""
+    if is_empty(h1_raw):
+        return empty_frame()
     from engine import aggregate_4h
     raw = h1_raw[["Time", "Open", "High", "Low", "Close", "Volume"]]
     agg = aggregate_4h.aggregate(raw, anchor_hour=0, session_hours=None, data_cutoff=_utc(cutoff))
     fin = aggregate_4h.final_only(agg).reset_index(drop=True)
+    if not len(fin):
+        return empty_frame()
     d = fin[["Time", "Open", "High", "Low", "Close", "Volume"]].copy()
     d["End"] = pd.to_datetime(fin["end_utc"], utc=True)
     return d[COLS].reset_index(drop=True)
 
 
+def _safe(fn, *args):
+    """Fehlende/defekte Daten ergeben einen leeren Zeitrahmen statt einer Ausnahme."""
+    try:
+        out = fn(*args)
+        return empty_frame() if out is None else out
+    except Exception:
+        return empty_frame()
+
+
 def build_timeframes(h1, daily, cutoff):
     """Alle fuenf Zeitrahmen zum Signalzeitpunkt `cutoff`. Rueckgabe: {tf: {"closed": df, "partial": dict|None}}.
-    h1 = 1h-Kerzen (mit End), daily = Tageskerzen (mit End)."""
+    h1 = 1h-Kerzen (mit End), daily = Tageskerzen (mit End). Fehlende Daten (None/leer/defekt) -> leerer Zeitrahmen."""
     c = _utc(cutoff)
     out = {}
-    h1c = closed_until(h1, c)
+    h1c = _safe(closed_until, h1, c) if not is_empty(h1) else empty_frame()
     out["1h"] = {"closed": h1c, "partial": None}
-    out["4h"] = {"closed": closed_until(four_hour(h1, c), c), "partial": None}
-    dc = closed_until(daily, c)
-    out["D"] = {"closed": dc, "partial": partial_candle(h1c, "D", c)}
-    out["W"] = {"closed": closed_until(aggregate_week(dc), c), "partial": partial_candle(h1c, "W", c)}
-    out["M"] = {"closed": closed_until(aggregate_month(dc), c), "partial": partial_candle(h1c, "M", c)}
+    out["4h"] = {"closed": _safe(lambda: closed_until(four_hour(h1, c), c)), "partial": None}
+    dc = _safe(closed_until, daily, c) if not is_empty(daily) else empty_frame()
+    def part(tf):
+        try:
+            return partial_candle(h1c, tf, c) if len(h1c) else None
+        except Exception:
+            return None
+    out["D"] = {"closed": dc, "partial": part("D")}
+    out["W"] = {"closed": _safe(lambda: closed_until(aggregate_week(dc), c)) if len(dc) else empty_frame(), "partial": part("W")}
+    out["M"] = {"closed": _safe(lambda: closed_until(aggregate_month(dc), c)) if len(dc) else empty_frame(), "partial": part("M")}
     return out

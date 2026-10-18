@@ -8,6 +8,8 @@ Bis zum Testende wird am laufenden Zwei-Monats-Test nichts verändert.
 2. **Pro.2 wird durch C+ ersetzt** (gleiche Einstiege wie Pro.1, C+-Ausstieg) und schreibt in die bisherige Pro.2-Gruppe.
 3. Pro.4 bis Pro.8 werden abgeschaltet.
 4. Danach benennt der Nutzer die Telegram-Gruppen um (Pro.1 Baseline, Pro.3 Volumen, C+). Ich gebe Bescheid, wenn es so weit ist.
+   - **Pro.6-Gruppe wird Variante D** (Docht-Stop, am Zwischentief nachgezogen, gleiche Einstiege wie Pro.1). Entscheidung des Nutzers 16.10.2026. Gruppen danach: Pro.1 Baseline, Pro.3 Volumen, C+, D.
+   - **Linienerkennung bleibt auf voller Historie** (kein 540-Kerzen-Fenster), Entscheidung 16.10.2026.
 
 ## Gruppe „STR3 System“
 5. Nur noch: **Bericht alle 2 Wochen** (sonntags 20:00) + **Bericht auf Abruf** mit `bericht`.

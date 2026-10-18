@@ -68,11 +68,13 @@ def connectivity_test(active_variants):
 class TelegramService:
     """Bündelt Config, RealTransport, persistente Queue und Dispatcher für den Live-Betrieb.
     Idempotent (message_idempotency_key), retry-fähig, neustart-fest. No-Op wenn Telegram inaktiv."""
-    def __init__(self, active_variants):
-        self.cfg, report = load_and_validate(read_env(), active_variants)
+    def __init__(self, active_variants, env=None, transport=None, queue_path=None):
+        """env/transport/queue_path sind nur fuer Tests injizierbar (Default: .env, echter Transport)."""
+        self.cfg, report = load_and_validate(env if env is not None else read_env(), active_variants)
         self.enabled = self.cfg.enabled
-        self.transport = RealTelegramTransport(self.cfg.token) if self.enabled else None
-        self.queue = PersistentQueue(QUEUE_PATH, max_retries=self.cfg.max_retries,
+        self.transport = transport if transport is not None else (
+            RealTelegramTransport(self.cfg.token) if self.enabled else None)
+        self.queue = PersistentQueue(queue_path or QUEUE_PATH, max_retries=self.cfg.max_retries,
                                      backoff_seconds=self.cfg.retry_backoff_seconds)
         self.dispatcher = Dispatcher(self.cfg, self.queue)
 
@@ -88,28 +90,63 @@ class TelegramService:
         self._flush()
         return r
 
-    def trade_opened(self, t, chart_path=None):
-        body = (f"{t.direction} · Einstieg geplant (Open nächste Kerze)\n"
-                f"Stop: {t.stop_initial} · Ziel: {t.target}\nparent_signal_id: {t.parent_signal_id}")
+    def trade_opened(self, t, chart_path=None, quote=None, booked=None):
+        """Eroeffnungsmeldung (A4): Zeiten in deutscher Zeit, gebuchter Einstieg, aktueller Kurs, Abstaende in
+        Preis und R. Der Anhang (Trade-PDF/PNG) folgt separat (trade_attachment), damit die Meldung nie auf die
+        PDF-Erstellung wartet und die Caption-Grenze (1024 Zeichen) nichts abschneidet."""
+        from . import trade_text as TT
+        body = TT.trade_opened_text(t, quote=quote, booked=booked)
         m = M.Message(t.strategy_id, "v1", M.TRADE_OPENED, symbol=t.symbol,
                       trade_id=t.trade_id, parent_signal_id=t.parent_signal_id, body=body)
+        r = self.send(m, period="text")
         if chart_path:
-            m.document_path = chart_path      # Chart mit eingezeichneten Kriterien als Bild
-        self.send(m)
+            self.trade_attachment(t, chart_path)
+        return r
+
+    def trade_attachment(self, t, path):
+        from . import trade_text as TT
+        d = M.Message(t.strategy_id, "v1", M.TRADE_OPENED, symbol=t.symbol,
+                      trade_id=t.trade_id, parent_signal_id=t.parent_signal_id,
+                      body=f"Anhang: {'Top-down-PDF' if str(path).lower().endswith('.pdf') else 'Chart'} "
+                           f"zu {t.symbol} ({TT.strategy_short(t.strategy_id)})")
+        d.document_path = path
+        return self.send(d, period="doc")
 
     def trade_closed(self, t):
         r = t.result
         mt = {"TARGET": M.TARGET_HIT, "STOP": M.STOP_HIT, "BREAK_EVEN": M.BREAK_EVEN_EXIT}.get(
             r.get("outcome"), M.STOP_HIT)
-        body = (f"{t.direction} beendet: {r.get('outcome')}\n"
-                f"Ergebnis: {r.get('netto_r')} R netto · {r.get('net_return_pct')} % netto\n"
+        body = (f"{t.direction} beendet: {r.get('outcome')}" + chr(10) +
+                f"Ergebnis: {r.get('netto_r')} R netto · {r.get('net_return_pct')} % netto" + chr(10) +
                 f"Dauer: {r.get('duration_days')} Tage · parent_signal_id: {t.parent_signal_id}")
         self.send(M.Message(t.strategy_id, "v1", mt, symbol=t.symbol, trade_id=t.trade_id,
                             parent_signal_id=t.parent_signal_id, body=body))
 
+    def cplus_event(self, t, ev):
+        """C+-Ereignis (Stufe 2 / Schwelle nachgezogen / Ausstieg) in die Gruppe der Variante."""
+        from . import trade_text as TT
+        from engine import exit_cplus as XC
+        mtype = {XC.EV_STAGE2: M.CPLUS_STAGE2, XC.EV_TRAIL: M.CPLUS_TRAIL}.get(ev["kind"], M.TRADE_EXIT)
+        titles = {XC.EV_STAGE2: "Stufe 2 erreicht", XC.EV_TRAIL: ("Stop nachgezogen" if t.exit_mode == "D" else "Schwelle nachgezogen"),
+                  XC.EV_EXIT: "Ausstieg"}
+        m = M.Message(t.strategy_id, "v1", mtype, symbol=t.symbol, trade_id=t.trade_id,
+                      parent_signal_id=t.parent_signal_id, body=TT.cplus_event_text(t, ev),
+                      title=f"{t.strategy_id} – {titles.get(ev['kind'], 'Ereignis')}")
+        return self.send(m, period=ev["id"])
+
     def system(self, text):
         self.send(M.Message("SYSTEM", "-", M.SYSTEM_WARNING, body=text),
                   period=str(int(__import__("time").time())))
+
+    def system_info(self, text, period, title=""):
+        """Meldung an die Gruppe 'STR3 System' (Ausfall, Erholung, Zeitumstellung). period steuert die
+        Idempotenz: gleiche (text-Art, period) -> hoechstens eine Zustellung."""
+        return self.send(M.Message("SYSTEM", "-", M.SYSTEM_INFO, body=text, title=title), period=str(period))
+
+    def system_document(self, path, caption, period):
+        m = M.Message("SYSTEM", "-", M.SYSTEM_INFO, body=caption)
+        m.document_path = path
+        return self.send(m, period=str(period))
 
     def deliver_reports(self, reports, days, label, active_variants):
         """Kurztext + PDF je Variante an ihre Gruppe; Vergleichs-PDF an die Vergleichsgruppe."""

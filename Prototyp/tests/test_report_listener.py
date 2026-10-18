@@ -182,7 +182,7 @@ def test_status_report_build(tmp_path):
             t.entry_time = "2026-10-01T04:00:00+00:00"; t.result = {"status": "open", "mfe_r": 0.5, "mae_r": 0.1}
         return t
     store.add(mk("a", "closed", 2.0)); store.add(mk("b", "closed", -1.1, "STOP")); store.add(mk("c", "open", 0))
-    d = SR.collect(rt, None, check_process=False)
+    d = SR.collect(rt, None, check_process=False, variants=SR.ALL_VARIANTS)
     assert d["totals"]["closed"] == 2 and d["totals"]["open"] == 1
     p1 = d["variants"][0]
     assert p1["closed"] == 2 and abs(p1["rep"]["total_r_netto"] - 0.9) < 1e-9     # offene Trades zaehlen nicht
@@ -228,7 +228,7 @@ def test_total_pct_negative_group_and_groups_without_trades(tmp_path):
     from notify import status_report as SR
     rt = _seed(tmp_path, [("Str.3 Pro.1", "closed", -1.5, -1.1), ("Str.3 Pro.1", "closed", 0.5, 0.4),
                           ("Str.3 Pro.1", "open", 9.0, 0)])
-    d = SR.collect(rt, None, check_process=False)
+    d = SR.collect(rt, None, check_process=False, variants=SR.ALL_VARIANTS)
     v = {x["sid"]: x for x in d["variants"]}
     assert abs(SR.total_pct(v["Str.3 Pro.1"]) - (-1.0)) < 1e-9          # Summe aller geschlossenen, offener zaehlt nicht
     assert SR.pct_color(SR.total_pct(v["Str.3 Pro.1"])) == SR.RED
@@ -238,7 +238,7 @@ def test_total_pct_negative_group_and_groups_without_trades(tmp_path):
     assert SR.no_trade_reason(v["Str.3 Pro.8"]) == "nicht konfiguriert"
     assert os.path.getsize(SR.build_pdf(d, str(tmp_path / "o" / "r.pdf"))) > 5000
     cap = SR.caption(d)
-    assert "Pro.1 −1,0 %" in cap and "Pro.2 +" not in cap and "Pro.2 −" not in cap    # nur handelnde Varianten
+    assert "Pro.1 Baseline −1,0 %" in cap and "Pro.3 Volumen –" in cap
     assert len(cap) <= 1024
 
 
@@ -246,4 +246,4 @@ def test_caption_total_pct_line_positive(tmp_path):
     from notify import status_report as SR
     rt = _seed(tmp_path, [("Str.3 Pro.1", "closed", 81.9, 4.0)])
     cap = SR.caption(SR.collect(rt, None, check_process=False))
-    assert "Gesamt-% (alle abgeschlossenen Trades" in cap and "Pro.1 +81,9 %" in cap
+    assert "Gesamt-% je Gruppe" in cap and "Pro.1 Baseline +81,9 %" in cap and "C+" in cap

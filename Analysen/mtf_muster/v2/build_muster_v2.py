@@ -22,7 +22,7 @@ LIVE = os.path.join(HERE, "daten_kopie_live")
 CHOICES = [("SOL-USD", "2026-08-17T04:00", "sol_long_2026-08-17"),
            ("GBPJPY=X", "2026-08-28T16:00", "gbpjpy_short_2026-08-28"),
            ("AUDUSD=X", "2026-09-02T00:00", "audusd_short_2026-09-02")]
-LIVE_CHOICE = ("GBPAUD=X", "2026-10-15T04:00", "live_gbpaud_long_2026-10-15")
+LIVE_CHOICE = ("GBPAUD=X", "2026-10-15T04:00", "gbpaud_long_2026-10-15")
 
 
 def _load(src_dir):

@@ -15,7 +15,7 @@ BG, FG, GREY, CYAN, GOLD, GREEN, RED = "#0f1320", "#e8ecf5", "#9aa3b5", "#3fd0e0
 
 
 def render_trade_chart(df, name, sym, action, safety, direction, entry, stop, target,
-                       out_path, variant=""):
+                       out_path, variant="", dpi=220):
     """df = compat-4h (Spalten Time/Open/High/Low/Close, ganzzahliger Index). action/safety = Line-
     Objekte (oder None). entry/stop/target = Preis-Level. Speichert PNG unter out_path."""
     n = len(df)
@@ -66,6 +66,6 @@ def render_trade_chart(df, name, sym, action, safety, direction, entry, stop, ta
                  color=FG, fontsize=13, fontweight="bold")
     ax.legend(facecolor="#191f33", labelcolor=FG, edgecolor="#1e2438", fontsize=9, loc="best")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=95, facecolor=BG)
+    fig.savefig(out_path, dpi=dpi, facecolor=BG)
     plt.close(fig)
     return out_path

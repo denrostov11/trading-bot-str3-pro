@@ -80,3 +80,5 @@ Analysen/**/*.json
 Analysen/**/*.jsonl
 Analysen/**/*.txt
 Backtest_01.2025-06.2026/
+warte_state.json
+**/outage_outbox.json

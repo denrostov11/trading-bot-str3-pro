@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Linienerkennung je Zeitrahmen - nutzt die KANONISCHEN scan_100-Funktionen (pivots, find_lines, is_aplus,
-pick_safety, atr) mit den je Zeitrahmen skalierten Parametern aus params.py. Kein Engine-Code wird veraendert.
+"""Linienerkennung je Zeitrahmen - nutzt die KANONISCHEN scan_100-Funktionen (pivots, is_aplus, pick_safety, atr) mit den je
+Zeitrahmen skalierten Parametern aus params.py; die Paar-Suche (find_lines) laeuft ueber die schnelle, BEGRENZTE Variante
+fastlines.find_lines_fast (identische Ergebnisse, harte Obergrenzen, Zeitbudget). Kein Engine-Code wird veraendert.
 
 Kontextlinien (Monat/Woche/Tag/1h; es gibt dort kein Signal):
   1. Kandidaten = intakte Linien (kein Schlusskurs-Bruch), Action-Kriterien A+ (>= 3 Taps, Dauer, Winkel < 45 Grad).
@@ -8,15 +9,17 @@ Kontextlinien (Monat/Woche/Tag/1h; es gibt dort kein Signal):
   3. Rueckfall nach Tori: gibt es keine A+-Linie, genuegen 2 Beruehrungspunkte; dann gilt Punkt B = das JUENGSTE
      unberuehrte Hoch/Tief (groesstes i1), erst danach Naehe zum Kurs.
   4. Safety = pick_safety(...) (intakt, konvergent, Keil/Apex, Tap-Alter, richtige Seite).
-  5. Bias (rein informativ) = Trendrichtung der Hauptlinie (Steigung): steigende Linie -> Aufwaertstrend, fallende ->
-     Abwaertstrend (Unterstuetzung ODER Widerstand, solange sie intakt ist); nahezu waagerecht (< 3 Grad) -> seitwaerts, keine Aussage.
-Gibt es keine gueltige Linie: Ergebnis ohne Linie - es wird NICHTS erfunden.
+  5. Bias (rein informativ): siehe topdown.py - Struktur der letzten Swings, Lage des Kurses zu den Linien, Bruch einer Linie.
+     detect_context liefert dafuer die Eingaben in ctx.extra["bias_in"].
+Gibt es keine gueltige Linie (oder keine Daten / Zeitbudget ueberschritten): Ergebnis ohne Linie - es wird NICHTS erfunden.
 """
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
 from . import params as PR
+from .budget import MtfTimeout
+from .fastlines import find_lines_fast, is_aplus as _is_aplus_p, pick_safety as _pick_safety_p
 
 
 @dataclass
@@ -27,13 +30,19 @@ class Ctx:
     action: object = None              # scan_100.Line
     safety: object = None
     kind: str = ""                     # "A+" | "2-Punkt (Tori)" | ""
-    bias: str = ""                     # "up" | "down" | ""
+    bias: str = ""                     # "up" | "down" | "flat" | "" - Steigung der Hauptlinie (nur Anzeige / alte Regel)
     reason: str = ""                   # Begruendung, wenn keine Linie
     params: object = None
+    no_data: bool = False              # True: keine Kerzen -> "keine Daten"
+    timeout: bool = False              # True: Zeitbudget der Linien-Suche ueberschritten
+    safety_note: str = ""              # Begruendung, wenn Action-Line da, aber keine Safety Line
     extra: dict = field(default_factory=dict)
 
 
 FLAT_ANGLE_DEG = 3.0
+N_SWINGS = 3                                         # letzte N Swing-Hochs bzw. -Tiefs fuer die Struktur
+BREAK_RECENT = {"M": 6, "W": 8, "D": 10, "4h": 10, "1h": 12}      # "juenger Bruch" = Bruch in den letzten N Kerzen
+SWING_TOL_ATR = 0.1                                  # Swing-Preise innerhalb 0,1 ATR gelten als gleich
 
 
 def line_bias(line):
@@ -43,22 +52,58 @@ def line_bias(line):
     return "up" if (line.p1 - line.p0) / (line.i1 - line.i0) > 0 else "down"
 
 
-def detect_context(df_closed, tf):
-    """Kontextlinien fuer einen Zeitrahmen aus ABGESCHLOSSENEN Kerzen (df_closed mit Time/Open/High/Low/Close)."""
+def _bias_inputs(work, tf, piv, sup, res, ok, action, last, atr_last, P):
+    """Eingaben der Top-down-Bewertung: Swing-Preise, naechste intakte Unterstuetzung/Widerstand, juengster Linienbruch.
+    Rueckgabe: (Linienobjekte fuer die Darstellung, reine Zahlen-/Text-Eingaben fuer topdown.assess)."""
+    n = len(work)
+    lows = [float(work["Low"].iloc[i]) for i in piv[0][-N_SWINGS:]]
+    highs = [float(work["High"].iloc[i]) for i in piv[1][-N_SWINGS:]]
+    ref = n - 1
+
+    def near(kind):
+        c = [l for l in ok if l.kind == kind and (_is_aplus_p(l, P) or l is action)]
+        return min(c, key=lambda l: (abs(l.value_at(ref) - last), -l.score)) if c else None
+    # juengster Bruch einer A+-Linie, die jenseits der Linie geblieben ist (kein gescheiterter Ausbruch)
+    brk, brk_line = None, None
+    for l in sup + res:
+        if l.breaking_bar > 0 and _is_aplus_p(l, P) and l.breaking_bar >= n - BREAK_RECENT[tf]:
+            v = l.value_at(ref)
+            beyond = last > v if l.kind == "resistance" else last < v
+            if beyond and (brk is None or (l.breaking_bar, len(l.taps)) > (brk["bar"], brk["taps"])):
+                brk = {"kind": l.kind, "bar": int(l.breaking_bar), "bars_ago": int(n - 1 - l.breaking_bar), "taps": len(l.taps)}
+                brk_line = l
+    ns, nr = near("support"), near("resistance")
+    bias_lines = {"support": ns, "resistance": nr, "break": brk_line}
+    return bias_lines, {"highs": highs, "lows": lows, "tol": SWING_TOL_ATR * atr_last, "atr": atr_last, "last": last,
+            "support": None if ns is None else {"bias": line_bias(ns), "taps": len(ns.taps), "kind": ns.kind},
+            "resistance": None if nr is None else {"bias": line_bias(nr), "taps": len(nr.taps), "kind": nr.kind},
+            "break": brk}
+
+
+def detect_context(df_closed, tf, deadline=None):
+    """Kontextlinien fuer einen Zeitrahmen aus ABGESCHLOSSENEN Kerzen (df_closed mit Time/Open/High/Low/Close).
+    deadline: optionales budget.Deadline fuer die Linien-Suche; bei Ueberschreitung -> Ctx ohne Linien (timeout=True)."""
     P = PR.scaled(tf)
     ctx = Ctx(tf=tf, params=P)
-    if df_closed is None or len(df_closed) < P.min_bars:
-        ctx.reason = f"zu wenig Historie ({0 if df_closed is None else len(df_closed)} Kerzen, nötig {P.min_bars})"
+    nb = 0 if df_closed is None else len(df_closed)
+    if nb == 0:
+        ctx.no_data, ctx.reason = True, "keine Daten"
+        return ctx
+    if nb < P.min_bars:
+        ctx.df = df_closed.tail(P.window).reset_index(drop=True)
+        ctx.reason = f"zu wenig Historie ({nb} Kerzen, nötig {P.min_bars})"
         return ctx
     work = df_closed.tail(P.window).reset_index(drop=True)
     ctx.df = work
     s100 = PR._s100()
-    with PR.scan_params(tf):
+    try:
         a = s100.atr(work)
         ctx.atr = a
         piv = s100.pivots(work, k=P.k)
-        sup = s100.find_lines(work, "support", a, piv)
-        res = s100.find_lines(work, "resistance", a, piv)
+        sup, i1 = find_lines_fast(work, "support", a, piv, P, deadline=deadline)
+        res, i2 = find_lines_fast(work, "resistance", a, piv, P, deadline=deadline)
+        ctx.extra["search"] = {"pivots": (i1["pivots"], i2["pivots"]), "pairs": i1["pairs"] + i2["pairs"],
+                               "truncated": bool(i1["truncated"] or i2["truncated"])}
         n = len(work)
         last = float(work["Close"].iloc[-1])
         atr_last = max(float(a.iloc[-1]), 1e-12)
@@ -70,18 +115,27 @@ def detect_context(df_closed, tf):
             if (l.kind == "support" and v <= last) or (l.kind == "resistance" and v >= last):
                 ok.append(l)
         dist = lambda l: abs(l.value_at(n - 1) - last) / atr_last
-        aplus = [l for l in ok if s100.is_aplus(l)]
+        aplus = [l for l in ok if _is_aplus_p(l, P)]
         if aplus:
             ctx.action, ctx.kind = min(aplus, key=lambda l: (dist(l), -l.score)), "A+"
         elif ok:
             ctx.action, ctx.kind = max(ok, key=lambda l: (l.i1, -dist(l))), "2-Punkt (Tori)"
+        ctx.extra["bias_lines"], ctx.extra["bias_in"] = _bias_inputs(work, tf, piv, sup, res, ok, ctx.action, last, atr_last, P)
         if ctx.action is None:
             ctx.reason = "keine gültige Linie nach unseren Regeln"
             return ctx
         opp = res if ctx.action.kind == "support" else sup
-        ctx.safety = s100.pick_safety(ctx.action, opp, work, a)
+        ctx.safety = _pick_safety_p(ctx.action, opp, work, a, P)
+        if ctx.safety is None:
+            ctx.safety_note = "keine gültige Safety Line nach unseren Regeln"
         ctx.bias = line_bias(ctx.action)
         ctx.extra["dist_atr"] = round(dist(ctx.action), 2)
+    except MtfTimeout:
+        ctx.action = ctx.safety = None
+        ctx.timeout = True
+        ctx.reason = "Zeitbudget der Linien-Suche überschritten – keine Linienaussage"
+        ctx.extra.pop("bias_in", None)
+        ctx.extra.pop("bias_lines", None)
     return ctx
 
 

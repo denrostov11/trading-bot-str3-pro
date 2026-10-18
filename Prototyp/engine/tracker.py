@@ -163,6 +163,14 @@ class PaperTrade:
     result: dict = field(default_factory=dict)
     code_version: str = "engine-0.3"
     config_hash: str = ""
+    # --- ab Neustart 17.10.2026 (alle mit Default -> alte trades.json bleiben lesbar) ---
+    exit_mode: str = ""                                  # "" = klassisch (Stop/Ziel/BE) | "CPLUS"
+    safety_line: dict = field(default_factory=dict)      # {d0,p0,d1,p1}: Safety Line relativ zur Signalkerze (C+)
+    cplus: dict = field(default_factory=dict)            # persistenter C+-Zustand (Stufe, Schwelle, Ereignisse)
+    signal_end_time: str = ""                            # Schlusszeit der Signalkerze (UTC, ISO)
+    booked_entry: dict = field(default_factory=dict)     # theoretischer Einstieg (Open Folgekerze): {price,time}
+    realistic: dict = field(default_factory=dict)        # realistischer Einstieg = Kurs beim Versand
+    notif: dict = field(default_factory=dict)            # Zustellmarken {opened,closed} (Telegram)
 
 
 class PaperTradeStore:

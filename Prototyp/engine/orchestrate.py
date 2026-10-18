@@ -75,16 +75,21 @@ def _compute_features(compat, det, asset_class, daily_df=None):
     return f
 
 
-def _build_fin(symbol, cache, downloader, anchor_hour, session_hours, now, log):
+def _build_fin(symbol, cache, downloader, anchor_hour, session_hours, now, log, df1h_merged=None):
     """Fetch -> cache/merge -> 4h-Aggregation -> final_only. Gibt (fin_df, error_dict).
-    fin_df=None (und error_dict gesetzt) bei NO_DATA / INSUFFICIENT_HISTORY."""
-    df1h = dataaccess.fetch(symbol, downloader=downloader, log=log)
-    if df1h is None:
-        return None, {"symbol": symbol, "status": "NO_DATA"}
-    if cache is not None:
-        df1h = cache.merge(symbol, "1h", df1h)
+    fin_df=None (und error_dict gesetzt) bei NO_DATA / INSUFFICIENT_HISTORY.
+    df1h_merged: bereits geladener UND in den Cache gemergter 1h-Frame (paralleler Abruf, engine/fastscan.py);
+    dann entfaellt der Download. Die Aggregation selbst bleibt unveraendert."""
+    if df1h_merged is not None:
+        df1h = df1h_merged
     else:
-        df1h = aggregate_4h_time_col(df1h)
+        df1h = dataaccess.fetch(symbol, downloader=downloader, log=log)
+        if df1h is None:
+            return None, {"symbol": symbol, "status": "NO_DATA"}
+        if cache is not None:
+            df1h = cache.merge(symbol, "1h", df1h)
+        else:
+            df1h = aggregate_4h_time_col(df1h)
     agg = aggregate_4h.aggregate(df1h, anchor_hour=anchor_hour, session_hours=session_hours,
                                  data_cutoff=now)
     fin = aggregate_4h.final_only(agg)
@@ -144,10 +149,24 @@ def _evaluate_candle(name, symbol, asset_class, is_futures, active_variants, led
             "signal_close": snap.signal_close, "baseline_stop": snap.baseline_stop,
             "baseline_target": snap.baseline_target, "baseline_rr": snap.baseline_rr,
             "action_sig": action_sig,
+            # Safety Line RELATIV zur Signalkerze (robust gegen Index-Verschiebungen des Frames) - Basis fuer C+
+            "safety_line": {"d0": int(det["safety"].i0 - bb), "p0": float(det["safety"].p0),
+                            "d1": int(det["safety"].i1 - bb), "p1": float(det["safety"].p1)},
+            "signal_end_time": _signal_end(fin_slice, signal_time),
             "variants": {d.strategy_id: d.status for d in decs},
             "variant_decisions": decs, "diagnostics": res.diagnostics, "compat": compat,
             # Linien-Objekte fuer die Chart-Darstellung (in-memory; werden NICHT serialisiert):
             "action_obj": det["action"], "safety_obj": det["safety"]}
+
+
+def _signal_end(fin_slice, signal_time_iso):
+    """Schlusszeit der Signalkerze (UTC, ISO) = end_utc der Aggregation, sonst Beginn + 4 h."""
+    try:
+        if "end_utc" in fin_slice.columns:
+            return pd.Timestamp(fin_slice["end_utc"].iloc[-1]).isoformat()
+    except Exception:
+        pass
+    return (pd.Timestamp(signal_time_iso) + pd.Timedelta(hours=4)).isoformat()
 
 
 def analyze_instrument(name, symbol, asset_class, is_futures, active_variants, ledger,
@@ -165,43 +184,24 @@ def analyze_instrument(name, symbol, asset_class, is_futures, active_variants, l
                             fin, now.isoformat(), config_params, detect_fn, daily_df, log)
 
 
-def _decision_times(fin, open_times):
-    """Ende jeder finalen 4h-Kerze (UTC) = Zeitpunkt, zu dem ihre Bewertung entschieden wird.
-    Nutzt die end_utc-Spalte der Aggregation; Fallback: Kerzenbeginn + 4 h."""
-    if "end_utc" in fin.columns:
-        ends = pd.to_datetime(fin["end_utc"], utc=True).reset_index(drop=True)
-        if len(ends) == len(open_times) and not ends.isna().any():
-            return ends
-    return (open_times + pd.Timedelta(hours=4)).reset_index(drop=True)
+_MISSING = object()
 
 
-def analyze_instrument_history(name, symbol, asset_class, is_futures, active_variants, ledger,
-                               since_time=None, downloader=None, cache=None, detect_fn=None,
-                               daily_df=None, anchor_hour=0, session_hours=None, now=None,
-                               config_params=None, log=None, max_replay=200, daily_asof_fn=None,
-                               lookback_bars=None):
-    """Wie analyze_instrument, aber holt LUECKEN nach (PC war zwischenzeitlich aus): bewertet jede
-    seit `since_time` NEU abgeschlossene 4h-Kerze der Reihe nach als eigenes 'letzte-Kerze'-Fenster.
-    Kein Look-ahead: jede Bewertung sieht nur Daten bis zu IHRER Kerze (Datenschnitt = Folgekerzen-Open).
+def _lookup_detector(precomputed, symbol, candle_time, fallback):
+    """Erkennung aus vorab (parallel) berechneten Ergebnissen; fehlt ein Eintrag -> normale Erkennung.
+    Schluessel = (Symbol, Beginn der zu bewertenden Kerze) - das Fenster ist eindeutig (fin[:k+1])."""
+    key = (symbol, pd.Timestamp(candle_time).isoformat())
+    def fn(compat):
+        v = precomputed.get(key, _MISSING)
+        if v is _MISSING:
+            return fallback(compat)
+        return v
+    return fn
 
-    Gibt (results, full_compat, newest_time):
-    - results      : Liste der Ergebnis-dicts je nachgeholter Kerze (chronologisch). Bei NO_DATA /
-                     INSUFFICIENT_HISTORY eine Ein-Element-Liste mit dem Fehlerstatus.
-    - full_compat  : alle finalen 4h-Kerzen (fuer Fill/Tracking der offenen Trades); None bei Fehler.
-    - newest_time  : ISO-Zeit der neuesten finalen Kerze (neuer Wasserstand); bei Fehler = since_time.
 
-    since_time=None (Erststart) -> nur die aktuelle letzte Kerze (KEIN History-Backfill der Vergangenheit).
-    max_replay deckelt Extremluecken (Datenalterung); aeltere verpasste Kerzen werden dann ausgelassen."""
-    detect_fn = detect_fn or default_detector
-    now = now or datetime.now(timezone.utc)
-    fin, err = _build_fin(symbol, cache, downloader, anchor_hour, session_hours, now, log)
-    if err is not None:
-        return [err], None, since_time
-
-    full_compat = fin[["Time", "Open", "High", "Low", "Close", "Volume"]].reset_index(drop=True)
-    times = pd.to_datetime(full_compat["Time"], utc=True)
-    n = len(fin)
-
+def plan_start(times, n, since_time, max_replay, symbol="", log=None):
+    """Index der ersten zu bewertenden Kerze (Lueckenaufholen). Eigenstaendig, damit der parallele Scan
+    (engine/fastscan.py) exakt dieselben Fenster vorberechnet wie die spaetere Bewertung."""
     if since_time is None:
         start_k = n - 1                      # Erststart: nur die aktuelle Kerze
     else:
@@ -216,6 +216,46 @@ def analyze_instrument_history(name, symbol, asset_class, is_futures, active_var
         start_k = n - max_replay
         if log is not None:
             log.append(f"{symbol}: Luecke > {max_replay} Kerzen - {skipped} aelteste ausgelassen")
+    return start_k
+
+
+def _decision_times(fin, open_times):
+    """Ende jeder finalen 4h-Kerze (UTC) = Zeitpunkt, zu dem ihre Bewertung entschieden wird.
+    Nutzt die end_utc-Spalte der Aggregation; Fallback: Kerzenbeginn + 4 h."""
+    if "end_utc" in fin.columns:
+        ends = pd.to_datetime(fin["end_utc"], utc=True).reset_index(drop=True)
+        if len(ends) == len(open_times) and not ends.isna().any():
+            return ends
+    return (open_times + pd.Timedelta(hours=4)).reset_index(drop=True)
+
+
+def analyze_instrument_history(name, symbol, asset_class, is_futures, active_variants, ledger,
+                               since_time=None, downloader=None, cache=None, detect_fn=None,
+                               daily_df=None, anchor_hour=0, session_hours=None, now=None,
+                               config_params=None, log=None, max_replay=200, daily_asof_fn=None,
+                               lookback_bars=None, df1h_merged=None, precomputed=None):
+    """Wie analyze_instrument, aber holt LUECKEN nach (PC war zwischenzeitlich aus): bewertet jede
+    seit `since_time` NEU abgeschlossene 4h-Kerze der Reihe nach als eigenes 'letzte-Kerze'-Fenster.
+    Kein Look-ahead: jede Bewertung sieht nur Daten bis zu IHRER Kerze (Datenschnitt = Folgekerzen-Open).
+
+    Gibt (results, full_compat, newest_time):
+    - results      : Liste der Ergebnis-dicts je nachgeholter Kerze (chronologisch). Bei NO_DATA /
+                     INSUFFICIENT_HISTORY eine Ein-Element-Liste mit dem Fehlerstatus.
+    - full_compat  : alle finalen 4h-Kerzen (fuer Fill/Tracking der offenen Trades); None bei Fehler.
+    - newest_time  : ISO-Zeit der neuesten finalen Kerze (neuer Wasserstand); bei Fehler = since_time.
+
+    since_time=None (Erststart) -> nur die aktuelle letzte Kerze (KEIN History-Backfill der Vergangenheit).
+    max_replay deckelt Extremluecken (Datenalterung); aeltere verpasste Kerzen werden dann ausgelassen."""
+    detect_fn = detect_fn or default_detector
+    now = now or datetime.now(timezone.utc)
+    fin, err = _build_fin(symbol, cache, downloader, anchor_hour, session_hours, now, log, df1h_merged)
+    if err is not None:
+        return [err], None, since_time
+
+    full_compat = fin[["Time", "Open", "High", "Low", "Close", "Volume"]].reset_index(drop=True)
+    times = pd.to_datetime(full_compat["Time"], utc=True)
+    n = len(fin)
+    start_k = plan_start(times, n, since_time, max_replay, symbol, log)
 
     # Entscheidungszeitpunkte (Kerzenende) nur fuer den Backtest-Pfad mit daily_asof_fn -
     # der Live-Pfad (ohne daily_asof_fn) bleibt vollstaendig unveraendert.
@@ -236,9 +276,12 @@ def analyze_instrument_history(name, symbol, asset_class, is_futures, active_var
         # gueltig -> nur die letzten lookback_bars Kerzen betrachten. Macht den Lauf machbar
         # (volle Historie waere >150s/Erkennung) und aendert gueltige Setups nicht. lo=0 = Live-Verhalten.
         lo = max(0, k + 1 - lookback_bars) if lookback_bars else 0
+        fn_k = detect_fn
+        if precomputed is not None:
+            fn_k = _lookup_detector(precomputed, symbol, times.iloc[k], detect_fn)
         results.append(_evaluate_candle(name, symbol, asset_class, is_futures, active_variants,
                                         ledger, fin.iloc[lo:k + 1], cutoff_iso, config_params,
-                                        detect_fn, daily_slice, log))
+                                        fn_k, daily_slice, log))
     newest_time = times.iloc[n - 1].isoformat()
     return results, full_compat, newest_time
 

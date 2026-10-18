@@ -29,7 +29,8 @@ from engine.tracker import PaperTradeStore
 from .redact import redact
 
 TZ = ZoneInfo("Europe/Berlin")
-VARIANTS = [f"Str.3 Pro.{i}" for i in range(1, 9)]
+ALL_VARIANTS = [f"Str.3 Pro.{i}" for i in range(1, 9)]       # Abschlussbericht des Zwei-Monats-Tests
+VARIANTS = ["Str.3 Pro.1", "Str.3 Pro.3", "Str.3 C+", "Str.3 D"]   # Neustart-Lauf (ab 17.10.2026)
 CLASS_LABEL = {"fx": "Devisen", "crypto": "Krypto", "futures": "Futures", "index": "Indizes",
                "stock": "Aktien/ETFs", "commodity": "Rohstoffe"}
 NE_REASON = {
@@ -100,6 +101,14 @@ def short_variant(sid):
     return sid.replace("Str.3 ", "")
 
 
+GROUP_LABEL = {"Str.3 Pro.1": "Pro.1 Baseline", "Str.3 Pro.3": "Pro.3 Volumen", "Str.3 C+": "C+ (Ausstieg nach C+)",
+               "Str.3 D": "D (Docht-Stop)"}
+
+
+def group_label(sid):
+    return GROUP_LABEL.get(sid, short_variant(sid))
+
+
 def fdt(ts_iso):
     """ISO-Zeit (UTC oder mit Offset) -> 'TT.MM. HH:MM' Europe/Berlin."""
     try:
@@ -134,11 +143,14 @@ def _load_json(path, retries=3):
     return None
 
 
-def _process_alive(needle="run_loop.py"):
-    """Best-effort: laeuft ein Prozess mit run_loop.py --zwei-monate? None = nicht feststellbar."""
+def _process_alive(needle="neustart"):
+    """Best-effort: laeuft ein Prozess mit run_loop.py --<needle>? None = nicht feststellbar."""
+    if not re.fullmatch(r"[a-z0-9-]+", needle or ""):
+        return None
     try:
-        cmd = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*run_loop.py*' "
-               "-and $_.CommandLine -like '*zwei-monate*' } | Measure-Object | Select-Object -ExpandProperty Count")
+        cmd = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.ProcessId -ne $PID "
+               "-and $_.CommandLine -like '*run_loop.py*' "
+               f"-and $_.CommandLine -like '*{needle}*' }} | Measure-Object | Select-Object -ExpandProperty Count")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
                            capture_output=True, text=True, timeout=20, creationflags=flags)
@@ -180,9 +192,11 @@ def scan_log(log_path, now, hours=24, tail_bytes=400_000):
     return out
 
 
-def collect(rt_dir, log_path=None, now=None, check_process=True):
-    """Sammelt alle Berichtsdaten (read-only) in ein dict."""
+def collect(rt_dir, log_path=None, now=None, check_process=True, variants=None, process_needle="neustart"):
+    """Sammelt alle Berichtsdaten (read-only) in ein dict. variants: Liste der strategy_ids (Standard: Neustart-Lauf
+    Pro.1/Pro.3/C+; Abschlussbericht: ALL_VARIANTS)."""
     now = now or datetime.now(TZ)
+    variants_list = list(variants) if variants else list(VARIANTS)
     manifest = _load_json(os.path.join(rt_dir, "START_MANIFEST.json")) or {}
     monitor = _load_json(os.path.join(rt_dir, "last_cycle_monitor.json")) or {}
     ledger = Ledger(os.path.join(rt_dir, "ledger.json"))          # Konstruktor liest nur
@@ -198,7 +212,7 @@ def collect(rt_dir, log_path=None, now=None, check_process=True):
                 and t.status in ("open", "pending_fill")]
 
     variants = []
-    for sid in VARIANTS:
+    for sid in variants_list:
         rep = REP.variant_report(ledger, trades, sid)
         cl = closed_of(sid)
         counts = ledger.counts_by_status(sid)
@@ -221,6 +235,10 @@ def collect(rt_dir, log_path=None, now=None, check_process=True):
             note = "nicht konfiguriert (PRO8_NOT_CONFIGURED) – handelt nie"
         if sid == "Str.3 Pro.7":
             note = "nur Diagnose, ohne Filterschwelle – handelt jedes Signal"
+        if sid == "Str.3 C+":
+            note = "gleiche Einstiege wie Pro.1, Ausstieg nach C+ (Schlusskurs an der Safety Line, kein festes Ziel)"
+        if sid == "Str.3 D":
+            note = "gleiche Einstiege wie Pro.1, Ausstieg nach D (Docht-Stop an der Safety Line, am Zwischentief nachgezogen, kein Ziel)"
         variants.append({"sid": sid, "rep": rep, "counts": counts, "evals": total_evals,
                          "open": len(open_of(sid)), "closed": len(cl), "best": best, "worst": worst,
                          "note": note, "ne_top": ne_top})
@@ -254,7 +272,7 @@ def collect(rt_dir, log_path=None, now=None, check_process=True):
             last_end = datetime.fromisoformat(monitor["end"]).astimezone(TZ)
         except ValueError:
             pass
-    alive = _process_alive() if check_process else None
+    alive = _process_alive(process_needle) if check_process else None
     age_min = None if last_end is None else (now - last_end).total_seconds() / 60.0
     if alive is False:
         status, color = "NICHT AKTIV – kein Prozess gefunden", RED
@@ -266,11 +284,23 @@ def collect(rt_dir, log_path=None, now=None, check_process=True):
         status, color = "VERZÖGERT – letzter Zyklus länger her (PC evtl. im Standby; holt beim Aufwachen nach)", AMBER
     logscan = scan_log(log_path, now) if log_path else {"errors": 0, "samples": [], "readable": False}
 
+    from . import trade_text as TT
+    rv = {}
+    for sid in variants_list:
+        rows = [x for x in (TT.realistic_vs_theoretical(t) for t in closed_of(sid)) if x]
+        if rows:
+            rv[sid] = {"n": len(rows), "adverse_r": sum(x["adverse_r"] for x in rows) / len(rows),
+                       "r_theo": sum(x["r_theo"] for x in rows), "r_real": sum(x["r_real"] for x in rows),
+                       "pct_theo": sum(x["pct_theo"] for x in rows), "pct_real": sum(x["pct_real"] for x in rows)}
+    run_info = {"stage": manifest.get("stage", "–"), "start_local": manifest.get("start_local"),
+                "unlimited": bool(manifest.get("unlimited")), "code_version": manifest.get("code_version"),
+                "last_cycle_mode": monitor.get("mode"), "last_cycle_duration": monitor.get("duration_s"),
+                "first_alert_latency_s": monitor.get("first_alert_latency_s")}
     n_cand = len(ledger.candidates)
     n_acc = sum(1 for c in ledger.candidates if c.get("status") == "ACCEPTED_PROVISIONAL")
     return {
         "now": now, "manifest": manifest, "monitor": monitor, "stage_end": stage_end,
-        "variants": variants, "classes": classes, "open_trades": open_trades,
+        "variants": variants, "classes": classes, "realistic": rv, "run": run_info, "open_trades": open_trades,
         "last_closed": last_closed,
         "totals": {"trades": len(trades), "open": len(open_of()), "closed": len(closed_of()),
                    "candidates": n_cand, "accepted": n_acc,
@@ -281,27 +311,22 @@ def collect(rt_dir, log_path=None, now=None, check_process=True):
 
 
 # ------------------------------------------------------------------ Kurztext (Bildunterschrift)
-def caption(d):
+def caption(d, final=False):
     now, tot = d["now"], d["totals"]
-    rest = "–"
+    run = d.get("run", {})
+    rest = "unbefristet"
     if d["stage_end"]:
         rest = fdelta(d["stage_end"] - now) + f" (bis {d['stage_end'].astimezone(TZ).strftime('%d.%m.%Y %H:%M')})"
-    lines = [f"Str.3 Pro – Zwischenstand {now.strftime('%d.%m.%Y %H:%M')}",
-             f"Restlaufzeit: {rest}",
-             f"Trades: {tot['trades']} (geschlossen {tot['closed']}, offen {tot['open']} – nicht gewertet)",
-             f"Signale: {tot['accepted']} akzeptiert, {tot['rejected']} abgelehnt",
-             "Gesamt-% (alle abgeschlossenen Trades, nach Kosten):"]
-    lines.append(" | ".join(f"{short_variant(v['sid'])} {fpct(total_pct(v))}"
-                            for v in d["variants"] if v["closed"]) or "noch keine geschlossenen Trades")
-    lines.append("Netto-R (nur geschlossene):")
-    parts = []
-    for v in d["variants"]:
-        if v["closed"]:
-            parts.append(f"{short_variant(v['sid'])} {fnum(v['rep']['total_r_netto'], 1, True)}")
-        else:
-            parts.append(f"{short_variant(v['sid'])} –")
-    lines.append(" · ".join(parts))
-    lines.append(f"System: {d['system']['status'].split(' –')[0]}")
+    head = "Abschlussbericht Zwei-Monats-Test" if final else "Zwischenstand Paper-Test"
+    lines = [f"Str.3 Pro – {head} {now.strftime('%d.%m.%Y %H:%M')}"]
+    lines.append("Gesamt-% je Gruppe (nur abgeschlossene Trades, nach Kosten):")
+    lines.append(" | ".join(f"{group_label(v['sid'])} {fpct(total_pct(v))}" for v in d["variants"]))
+    if not final:
+        le = d["system"]["last_end"]
+        lines.append(f"Lauf: {run.get('stage', '–')} – {d['system']['status'].split(' –')[0]}"
+                     + (f", letzter Zyklus {le.strftime('%d.%m. %H:%M')}" if le else ""))
+        lines.append(f"Laufzeit: {rest}")
+    lines.append(f"Trades: {tot['trades']} (geschlossen {tot['closed']}, offen {tot['open']} – nicht gewertet)")
     lines.append("Paper-Trading – keine echte Order.")
     return "\n".join(lines)[:1000]
 
@@ -310,8 +335,8 @@ def caption(d):
 class _Doc:
     W, H, M = 595.0, 842.0, 38.0
 
-    def __init__(self, pdf, stand):
-        self.pdf, self.stand, self.page_no = pdf, stand, 0
+    def __init__(self, pdf, stand, head="Str.3 Pro – Zwischenstand Paper-Test"):
+        self.pdf, self.stand, self.page_no, self.head = pdf, stand, 0, head
         self.fig = self.ax = None
         self.y = 0.0
         self._new_page()
@@ -323,7 +348,7 @@ class _Doc:
         self.fig = plt.figure(figsize=(self.W / 72, self.H / 72), facecolor="white")
         self.ax = self.fig.add_axes([0, 0, 1, 1])
         self.ax.set_xlim(0, self.W); self.ax.set_ylim(self.H, 0); self.ax.axis("off")
-        self.ax.text(self.M, 24, "Str.3 Pro – Zwischenstand Zwei-Monats-Paper-Test", fontsize=8, color=GREY, va="center")
+        self.ax.text(self.M, 24, self.head, fontsize=8, color=GREY, va="center")
         self.ax.text(self.W - self.M, 24, self.stand, fontsize=8, color=GREY, va="center", ha="right")
         self.ax.plot([self.M, self.W - self.M], [34, 34], color=LINEC, lw=0.6)
         self.y = 50.0
@@ -388,29 +413,40 @@ class _Doc:
         self.y += h + 8
 
     def result_cards(self, variants):
-        """Gesamt-% je Variante als grosse Zahl (4 Karten je Zeile)."""
-        cw, ch, gap = (self.W - 2 * self.M - 3 * 6) / 4.0, 62.0, 6.0
-        for row in range(2):
+        """Gesamt-% je Variante als GROSSE Zahl (bis 4 Karten je Zeile; bei <= 3 Varianten besonders gross)."""
+        n = len(variants)
+        per_row = min(4, max(1, n))
+        big = n <= 4
+        cw = (self.W - 2 * self.M - (per_row - 1) * 6) / float(per_row)
+        ch, gap = (96.0 if big else 62.0), 6.0
+        rows = (n + per_row - 1) // per_row
+        for row in range(rows):
             self.ensure(ch + 6)
-            for col in range(4):
-                v = variants[row * 4 + col]
+            for col in range(per_row):
+                idx = row * per_row + col
+                if idx >= n:
+                    break
+                v = variants[idx]
                 x0 = self.M + col * (cw + gap)
                 val = total_pct(v)
                 c = pct_color(val)
                 self.ax.add_patch(Rectangle((x0, self.y), cw, ch, facecolor=c, alpha=0.09, edgecolor="none"))
                 self.ax.add_patch(Rectangle((x0, self.y), 3, ch, facecolor=c, edgecolor="none"))
-                self.ax.text(x0 + 9, self.y + 11, short_variant(v["sid"]), fontsize=9, fontweight="bold",
-                             color=NAVY, va="center")
+                self.ax.text(x0 + 9, self.y + (13 if big else 11), group_label(v["sid"]),
+                             fontsize=11 if big else 9, fontweight="bold", color=NAVY, va="center")
                 if val is None:
-                    self.ax.text(x0 + 9, self.y + 31, "keine Trades", fontsize=12, fontweight="bold", color=GREY, va="center")
-                    self.ax.text(x0 + 9, self.y + 50, no_trade_reason(v), fontsize=6.6, color=GREY, va="center")
+                    self.ax.text(x0 + 9, self.y + (46 if big else 31), "keine Trades", fontsize=17 if big else 12,
+                                 fontweight="bold", color=GREY, va="center")
+                    self.ax.text(x0 + 9, self.y + (80 if big else 50), no_trade_reason(v), fontsize=7.4 if big else 6.6,
+                                 color=GREY, va="center")
                 else:
                     r = v["rep"]
-                    self.ax.text(x0 + 9, self.y + 31, fpct(val), fontsize=16, fontweight="bold", color=c, va="center")
-                    self.ax.text(x0 + 9, self.y + 45, f"{v['closed']} Trades",
-                                 fontsize=6.8, color=GREY, va="center")
-                    self.ax.text(x0 + 9, self.y + 54, f"{r['winners']} Gewinner / {r['losers']} Verlierer",
-                                 fontsize=6.8, color=GREY, va="center")
+                    self.ax.text(x0 + 9, self.y + (50 if big else 31), fpct(val), fontsize=(30 if n <= 3 else 22) if big else 16,
+                                 fontweight="bold", color=c, va="center")
+                    self.ax.text(x0 + 9, self.y + (74 if big else 45), f"{v['closed']} Trades",
+                                 fontsize=8 if big else 6.8, color=GREY, va="center")
+                    self.ax.text(x0 + 9, self.y + (86 if big else 54), f"{r['winners']} Gewinner / {r['losers']} Verlierer",
+                                 fontsize=8 if big else 6.8, color=GREY, va="center")
             self.y += ch + gap
 
     def bar_chart(self, variants, title):
@@ -487,15 +523,16 @@ class _Doc:
         self.y += 8
 
 
-def build_pdf(d, path):
-    """Erzeugt das Zwischenstands-PDF aus den gesammelten Daten. Gibt den Pfad zurueck."""
+def build_pdf(d, path, title="Zwischenstand Paper-Test (Neustart-Lauf)", final=False):
+    """Erzeugt das Berichts-PDF aus den gesammelten Daten. final=True: Abschlussbericht des Zwei-Monats-Tests
+    (alle Varianten, nur geschlossene Trades, ohne Systemstatus). Gibt den Pfad zurueck."""
     now, tot, sysd = d["now"], d["totals"], d["system"]
     stand = now.strftime("Stand %d.%m.%Y %H:%M (Europe/Berlin)")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with PdfPages(tmp) as pdf:
-        doc = _Doc(pdf, stand)
-        doc.title("Zwischenstand Zwei-Monats-Paper-Test", f"Erstellt am {now.strftime('%d.%m.%Y um %H:%M Uhr')} (Europe/Berlin)")
+        doc = _Doc(pdf, stand, head="Str.3 Pro – " + title)
+        doc.title(title, f"Erstellt am {now.strftime('%d.%m.%Y um %H:%M Uhr')} (Europe/Berlin)")
         doc.heading("Gesamtergebnis je Gruppe (alle abgeschlossenen Trades)")
         doc.result_cards(d["variants"])
         doc.bar_chart(d["variants"], "Gesamt-% je Variante (nach Kosten)")
@@ -508,23 +545,26 @@ def build_pdf(d, path):
                 start = datetime.fromisoformat(man["start_local"]).astimezone(TZ).strftime("%d.%m.%Y %H:%M") + " Uhr"
             except ValueError:
                 pass
-        end_txt = d["stage_end"].astimezone(TZ).strftime("%d.%m.%Y %H:%M") if d["stage_end"] else "–"
-        rest = fdelta(d["stage_end"] - now) if d["stage_end"] else "–"
-        doc.box("Testfenster und Restlaufzeit", [
-            f"Start: {start}   ·   Ende: {end_txt} Uhr (Europe/Berlin)",
-            f"Restlaufzeit: {rest}",
+        end_txt = d["stage_end"].astimezone(TZ).strftime("%d.%m.%Y %H:%M") + " Uhr" if d["stage_end"] else "unbefristet"
+        rest = fdelta(d["stage_end"] - now) if d["stage_end"] else "unbefristet (läuft bis zum Stopp)"
+        doc.box("Testfenster" + ("" if final else " und Laufzeit"), [
+            f"Start: {start}   ·   Ende: {end_txt} (Europe/Berlin)",
+            ("Testende erreicht – Abschlussbericht." if final else f"Laufzeit: {rest}"),
             f"Signale: {tot['candidates']} Kandidaten geprüft, {tot['accepted']} akzeptiert, {tot['rejected']} abgelehnt (Datenqualität/Rollover).",
             f"Trades gesamt: {tot['trades']}  ·  geschlossen: {tot['closed']}  ·  offen: {tot['open']} (offen = nicht gewertet).",
         ], BLUE)
         doc.box("Wichtig zur Wertung", [
-            "Trades, die am 17.10. noch offen sind, werden NICHT gewertet (Nutzerentscheidung). Alle Kennzahlen in diesem "
-            "Bericht stammen deshalb nur aus GESCHLOSSENEN Trades. Offene Trades sind als „offen, nicht gewertet“ gekennzeichnet.",
+            ("Trades, die am Testende (17.10.2026 12:00) noch offen waren, werden NICHT gewertet (Nutzerentscheidung); sie "
+             "stehen als „offen, nicht gewertet“ in der Liste. " if final else
+             "Offene Trades werden NICHT gewertet (Nutzerentscheidung). ") +
+            "Alle Kennzahlen in diesem Bericht stammen aus GESCHLOSSENEN Trades.",
             "Kennzahlen sind brutto/netto nach Kosten und Slippage; Prozent = Summe der Einzeltrade-Prozent bei gleichem "
             "Einsatz je Trade (kein Kapitalkonto). Kleine Stichproben (unter 30 Trades) sind nicht belastbar.",
         ], AMBER)
 
         # Systemstatus
         mon = d["monitor"]
+        run = d.get("run", {})
         le = sysd["last_end"].strftime("%d.%m.%Y %H:%M") if sysd["last_end"] else "–"
         age = "–" if sysd["age_min"] is None else (f"{int(sysd['age_min'])} Min." if sysd["age_min"] < 180
                                                     else f"{sysd['age_min'] / 60:.1f} Std.".replace(".", ","))
@@ -533,18 +573,24 @@ def build_pdf(d, path):
         log_line = ("Log nicht lesbar" if not lg["readable"] else
                     ("keine Fehler in den letzten 24 Stunden" if lg["errors"] == 0 else
                      f"{lg['errors']} Fehlerzeile(n) in den letzten 24 Stunden"))
+        run_start = fdt(run.get("start_local")) if run.get("start_local") else "–"
         lines = [
-            f"Paper-Lauf: {sysd['status']}",
-            f"Prozess aktiv: {alive}   ·   letzter Zyklus: {le} (vor {age})",
-            f"Letzter Zyklus: {mon.get('instruments', '–')} Instrumente, Trigger {mon.get('accepted', '–')}, "
+            f"Neuer Lauf ({run.get('stage', '–')}, ab {run_start}, {'unbefristet' if run.get('unlimited') else 'befristet'}): "
+            f"{sysd['status']}",
+            f"Letzter Zyklus: {le} Uhr (vor {age})  ·  Art: {run.get('last_cycle_mode') or '–'}  ·  "
+            f"Dauer: {fnum(run.get('last_cycle_duration'), 0)} s  ·  erste Meldung nach Kerzenschluss: "
+            f"{fnum(run.get('first_alert_latency_s'), 0)} s",
+            f"Prozess aktiv: {alive}   ·   code_version: {run.get('code_version') or '–'}",
+            f"Zyklus-Inhalt: {mon.get('instruments', '–')} Instrumente, Trigger {mon.get('accepted', '–')}, "
             f"eröffnet {mon.get('opened', '–')}, geschlossen {mon.get('closed', '–')}, Fehler {mon.get('errors', '–')}, "
             f"ohne Daten {mon.get('no_data', '–')}, Telegram: {mon.get('telegram', '–')}",
             f"Log: {log_line}",
         ] + [f"   · {s}" for s in lg["samples"]]
-        doc.box("Systemstatus", lines, sysd["color"])
+        if not final:
+            doc.box("Systemstatus – läuft der neue Lauf?", lines, sysd["color"])
 
         # Vergleichstabelle
-        doc.heading("Vergleich aller Varianten (nur geschlossene Trades)")
+        doc.heading("Vergleich der Varianten (nur geschlossene Trades)")
         rows = []
         for v in d["variants"]:
             r = v["rep"]
@@ -564,7 +610,8 @@ def build_pdf(d, path):
         doc.table(["Variante", "Geschl.", "Offen", "Gew.", "Verl.", "Trefferq.", "Gesamt-%", "Netto-R", "PF", "MaxDD R"],
                   rows, [56, 48, 42, 40, 40, 62, 72, 62, 44, 53], ["l"] + ["r"] * 9, cell_style=_style)
         doc.para("Gesamt-% = Summe der Netto-% aller abgeschlossenen Trades. Gew./Verl. = Netto-R über/unter 0 (Break-even-Ausstiege mit Kosten zählen als Verlierer). "
-                 "PF = Profit-Faktor. MaxDD R = größter Rückgang der R-Kurve. Pro.1 läuft mit BE-0, Pro.2–8 mit BE-1.",
+                 "PF = Profit-Faktor. MaxDD R = größter Rückgang der R-Kurve. Pro.1 läuft mit BE-0, Pro.2–8 mit BE-1; "
+                 "C+ und D haben kein Break-even und kein festes Ziel (Ausstieg nach C+ bzw. D).",
                  size=7.5, color=GREY)
 
         # Je Variante
@@ -594,6 +641,20 @@ def build_pdf(d, path):
                 doc.para("Hinweis: " + v["note"], size=8, indent=8, color=AMBER, gap=0)
             doc.y += 5
 
+        # Theoretischer gegen realistischen Einstieg (Zusatzangabe)
+        rv = d.get("realistic") or {}
+        if rv:
+            doc.heading("Zusatzangabe: theoretischer gegen realistischen Einstieg")
+            rows = []
+            for sid, x in rv.items():
+                rows.append([group_label(sid), x["n"], fnum(x["adverse_r"], 3, True), fnum(x["r_theo"], 2, True),
+                             fnum(x["r_real"], 2, True), fnum(x["pct_theo"], 1, True), fnum(x["pct_real"], 1, True)])
+            doc.table(["Gruppe", "Trades", "Ø Abw. R", "Netto-R theor.", "Netto-R real.", "Netto-% theor.", "Netto-% real."],
+                      rows, [110, 44, 62, 78, 78, 80, 80], ["l"] + ["r"] * 6)
+            doc.para("Gewertet wird der THEORETISCHE Einstieg (Open der Folgekerze). Der realistische Einstieg ist der Kurs "
+                     "beim Versand der Meldung (1m/5m-Daten); Ø Abw. R > 0 = realistisch schlechter. Nur Trades, bei denen "
+                     "ein Kurs beim Versand gespeichert wurde.", size=7.5, color=GREY)
+
         # Instrumentklassen
         doc.heading("Aufteilung nach Instrumentklasse (alle Varianten zusammen)")
         rows = []
@@ -614,7 +675,7 @@ def build_pdf(d, path):
             res = t.result or {}
             state = "wartet auf Einstieg" if t.status == "pending_fill" else "offen"
             rows.append([short_variant(t.strategy_id), t.symbol, t.direction, state, fdt(t.entry_time) if t.entry_time else "–",
-                         fprice(t.stop_initial), fprice(t.target), fnum(res.get("mfe_r"), 2), fnum(res.get("mae_r"), 2)])
+                         fprice(t.stop_initial), ({"CPLUS": "C+", "D": "D"}.get(t.exit_mode) or fprice(t.target)), fnum(res.get("mfe_r"), 2), fnum(res.get("mae_r"), 2)])
         if rows:
             doc.table(["Variante", "Symbol", "Richtung", "Status", "Einstieg", "Stop", "Ziel", "MFE R", "MAE R"],
                       rows, [48, 80, 52, 78, 62, 66, 66, 52, 49],

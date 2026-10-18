@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Bericht-Abruf per Telegram: Schreibt der Nutzer in der Gruppe "STR3 System" das Wort "bericht"
-(oder /bericht, /bericht@<botname>), sendet der Bot dort eine PDF mit dem aktuellen Stand des
-laufenden Zwei-Monats-Paper-Tests.
+"""Gruppe "STR3 System": (d) Bericht-Abruf per Telegram - schreibt der Nutzer das Wort "bericht" (oder /bericht,
+/bericht@<botname>), sendet der Bot dort eine PDF mit dem aktuellen Stand des laufenden Paper-Laufs (Pro.1, Pro.3, C+).
+Zusaetzlich (selber Prozess, ohne Eingriff in den Lauf): (b) Erinnerung an die Zeitumstellung (Vorabend 20:00 und Tag
+08:00), (c) Bericht alle 2 Wochen sonntags 20:00 (erstmals 01.11.2026, dieselbe PDF wie beim Abruf) und die
+Prozess-weg-Erkennung (Ausfall-Meldung, wenn der Lauf-Prozess nicht mehr existiert).
 
 Eigener, separater Prozess (aendert nichts am Paper-Lauf):
 - Long-Polling per getUpdates (Update-Offset atomar persistent -> nach Neustart nichts doppelt).
@@ -38,11 +40,12 @@ LOG_PATH = os.path.join(RUNTIME, "listener.log")
 LOCK_PATH = os.path.join(RUNTIME, "listener.lock")
 STOP_PATH = os.path.join(RUNTIME, "STOP")
 REPORT_DIR = os.path.join(RUNTIME, "reports")
-PAPER_RT = os.path.join(PROTO, "paper_runtime_2monate")
+PAPER_RT = os.path.join(PROTO, "paper_runtime_neustart")      # laufender Lauf (ab 17.10.2026)
+SCHEDULE_PATH = os.path.join(RUNTIME, "schedule_state.json")
 PAPER_LOG = os.path.join(PROTO, "run_loop_log.txt")
 
 MIN_INTERVAL_S = 60
-POLL_TIMEOUT_S = 50
+POLL_TIMEOUT_S = 25            # kurz genug fuer pünktliche geplante Meldungen (20:00 / 08:00)
 KEEP_REPORTS = 10
 
 log = logging.getLogger("report_listener")
@@ -214,6 +217,51 @@ class Listener:
         return results
 
 
+# ------------------------------------------------------------------ Geplante Meldungen (A3b/A3c)
+class ScheduleRunner:
+    """Zeitumstellungs-Erinnerungen und 2-Wochen-Bericht. Uhr, Sender und Berichtserzeuger sind injizierbar.
+    Zustand (bereits Gesendetes) atomar auf Platte -> nach Neustart nichts doppelt. Ein Fehler beim Senden
+    wird beim naechsten Tick erneut versucht, solange das Zeitfenster des Termins offen ist."""
+    def __init__(self, path, sender, build_report, system_chat_id, clock=time.time):
+        self.path, self.sender, self.build_report = path, sender, build_report
+        self.system_chat_id, self.clock = str(system_chat_id), clock
+        self.sent = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                self.sent = dict(json.load(f).get("sent", {}))
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"sent": self.sent}, f, indent=1)
+        os.replace(tmp, self.path)
+
+    def tick(self, now_utc=None):
+        from datetime import datetime, timezone
+        from notify import system_schedule as SS
+        now = now_utc or datetime.fromtimestamp(self.clock(), timezone.utc)
+        done = []
+        for item in SS.pending(now, self.sent):
+            try:
+                if item["kind"] == "text":
+                    self.sender.send_text(self.system_chat_id, f"{item['title']}" + chr(10) + item['text'])
+                else:
+                    path, caption = self.build_report()
+                    if item.get("late"):
+                        caption = "(nachgeholt – PC war zum Termin aus)" + chr(10) + caption
+                    self.sender.send_document(self.system_chat_id, path, caption)
+                self.sent[item["id"]] = now.isoformat()
+                self._save()
+                done.append(item["id"])
+                log.info("Geplante Meldung gesendet: %s", item["id"])
+            except Exception as e:
+                log.warning("Geplante Meldung %s fehlgeschlagen: %s", item["id"], safe_error(e))
+        return done
+
+
 # ------------------------------------------------------------------ Telegram-API (nur lesend: getUpdates/getMe/...)
 class ApiError(Exception):
     def __init__(self, msg, code=None):
@@ -264,7 +312,7 @@ def make_report_builder(now_fn=None):
     def build():
         from notify import status_report as SR
         from datetime import datetime
-        d = SR.collect(PAPER_RT, PAPER_LOG, now=now_fn() if now_fn else None)
+        d = SR.collect(PAPER_RT, PAPER_LOG, now=now_fn() if now_fn else None, process_needle="neustart")
         stamp = d["now"].strftime("%Y-%m-%d_%H%M")
         path = SR.build_pdf(d, os.path.join(REPORT_DIR, f"STR3_Zwischenstand_{stamp}.pdf"))
         _cleanup_reports()
@@ -345,11 +393,26 @@ def run_forever(settings):
             log.warning("Initialisierung fehlgeschlagen: %s", e)
 
     listener = Listener(state, sender, make_report_builder(), settings["system_chat"], settings["users"], username)
+    runner = ScheduleRunner(SCHEDULE_PATH, sender, make_report_builder(), settings["system_chat"])
+    from engine.outage import ProcessWatch
+    from notify import status_report as SR_
+
+    def _send_outage(kind, text, period):
+        try:
+            sender.send_text(settings["system_chat"], text)
+        except Exception as e:
+            log.warning("Ausfall-Meldung nicht zustellbar: %s", safe_error(e))
+    watch = ProcessWatch(PAPER_RT, lambda: SR_._process_alive("neustart"), _send_outage)
     backoff = 5
     while True:
         if os.path.exists(STOP_PATH):
             log.info("STOP-Datei erkannt - beende.")
             return 0
+        try:
+            runner.tick()
+            watch.poll()
+        except Exception as e:                       # darf das Abfragen nie stoppen
+            log.warning("Zeitplan/Prozesspruefung: %s", safe_error(e))
         try:
             ups = api.get_updates(state.offset)
             backoff = 5

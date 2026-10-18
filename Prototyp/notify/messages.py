@@ -27,7 +27,16 @@ CALENDAR_MONTH_REPORT = "CALENDAR_MONTH_REPORT"     # optional, klar getrennt
 STRATEGY_STATUS = "STRATEGY_STATUS"
 SYSTEM_WARNING = "SYSTEM_WARNING"
 
+# Ab Neustart 17.10.2026 (zusaetzlich zu den 16 Spec-Typen):
+CPLUS_STAGE2 = "CPLUS_STAGE2"                       # C+: Stufe 2 erreicht
+CPLUS_TRAIL = "CPLUS_TRAIL"                         # C+: Schwelle nachgezogen
+TRADE_EXIT = "TRADE_EXIT"                           # Ausstieg mit Grund (C+)
+PREWARN = "PREWARN"                                 # Vorwarnung 30/15 min vor 4h-Schluss (nur Information)
+PREWARN_RESOLVED = "PREWARN_RESOLVED"               # Aufloesung der Vorwarnung: bestaetigt / nicht bestaetigt
+SYSTEM_INFO = "SYSTEM_INFO"                         # Ausfall-/Erholungsmeldung, Zeitumstellung (System-Gruppe)
+
 ALL_TYPES = {
+    CPLUS_STAGE2, CPLUS_TRAIL, TRADE_EXIT, PREWARN, PREWARN_RESOLVED, SYSTEM_INFO,
     WATCHLIST_NEW, NEAR_TRIGGER, TRIGGER_CONFIRMED, TRADE_OPENED, FILTER_REJECTED, STOP_MOVED,
     TARGET_HIT, STOP_HIT, BREAK_EVEN_EXIT, TRADE_CANCELLED, DATA_QUALITY_REJECTED, WEEKLY_REPORT,
     ROLLING_30D_REPORT, CALENDAR_MONTH_REPORT, STRATEGY_STATUS, SYSTEM_WARNING,
@@ -37,7 +46,7 @@ ALL_TYPES = {
 AGGREGATE_ONLY = {FILTER_REJECTED, DATA_QUALITY_REJECTED}
 
 # Signal-/Trade-Meldungen brauchen den Paper-Trading-Hinweis
-_SIGNAL_TYPES = {WATCHLIST_NEW, NEAR_TRIGGER, TRIGGER_CONFIRMED, TRADE_OPENED, STOP_MOVED,
+_SIGNAL_TYPES = {CPLUS_STAGE2, CPLUS_TRAIL, TRADE_EXIT, PREWARN, PREWARN_RESOLVED, WATCHLIST_NEW, NEAR_TRIGGER, TRIGGER_CONFIRMED, TRADE_OPENED, STOP_MOVED,
                  TARGET_HIT, STOP_HIT, BREAK_EVEN_EXIT, TRADE_CANCELLED}
 
 PAPER_NOTICE = "Paper-Trading - keine echte Order."
@@ -60,13 +69,14 @@ class Message:
     is_system: bool = False              # -> Systemgruppe
     body: str = ""                       # bereits formatierter Text (aus lokalen Daten)
     document_path: str = ""              # optionaler PDF-Anhang (Berichte)
+    title: str = ""                      # optionaler eigener Kopf (statt "<strategy> (<version>) - <type>")
     target_chat_id: str = ""             # wird vom Router gesetzt
     created_at_utc: str = field(default_factory=_utcnow)
 
     def __post_init__(self):
         if self.message_type not in ALL_TYPES:
             raise ValueError(f"Unbekannter message_type: {self.message_type}")
-        if self.message_type == SYSTEM_WARNING:
+        if self.message_type in (SYSTEM_WARNING, SYSTEM_INFO):
             self.is_system = True
         if self.message_type in (WEEKLY_REPORT, ROLLING_30D_REPORT, CALENDAR_MONTH_REPORT,
                                   STRATEGY_STATUS) and not self.symbol:
@@ -79,7 +89,7 @@ class Message:
     def render_text(self) -> str:
         """Formatiert den finalen Nachrichtentext inkl. Kopf + ggf. Paper-Trading-Hinweis.
         KEINE Secrets, keine Berechnung - nur Darstellung uebergebener Werte."""
-        head = f"{self.strategy_id} ({self.strategy_version}) - {self.message_type}"
+        head = self.title or f"{self.strategy_id} ({self.strategy_version}) - {self.message_type}"
         lines = [head]
         if self.symbol and self.symbol != "-":
             lines.append(f"Instrument: {self.symbol}")

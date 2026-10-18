@@ -23,6 +23,10 @@ VARIANT_ENV = {
     "Str.3 Pro.6": "STR3_PRO6_CHAT_ID",
     "Str.3 Pro.7": "STR3_PRO7_CHAT_ID",
     "Str.3 Pro.8": "STR3_PRO8_CHAT_ID",
+    # C+ ersetzt ab dem Neustart (17.10.2026) die Pro.2-Gruppe: GLEICHER Telegram-Chat wie Pro.2.
+    "Str.3 C+": "STR3_PRO2_CHAT_ID",
+    # Variante D ersetzt die Pro.6-Gruppe: GLEICHER Telegram-Chat wie Pro.6.
+    "Str.3 D": "STR3_PRO6_CHAT_ID",
 }
 COMPARISON_ENV = "STR3_COMPARISON_CHAT_ID"
 SYSTEM_ENV = "STR3_SYSTEM_CHAT_ID"

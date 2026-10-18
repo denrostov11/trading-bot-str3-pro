@@ -109,7 +109,25 @@ def pro8(snapshot, f):
     return VariantDecision("Str.3 Pro.8", NOT_CONFIGURED, reason="PRO8_NOT_CONFIGURED")
 
 
+CPLUS_ID = "Str.3 C+"
+
+
+def cplus(snapshot, f):
+    # C+: GLEICHE Einstiege wie Pro.1 (keine Zusatzfilter); nur der Ausstieg unterscheidet sich (engine/exit_cplus.py).
+    return VariantDecision(CPLUS_ID, PASS)
+
+
+D_ID = "Str.3 D"
+
+
+def var_d(snapshot, f):
+    # D: GLEICHE Einstiege wie Pro.1 (keine Zusatzfilter); Ausstieg = Docht-Stop, am Zwischentief nachgezogen (engine/exit_d.py).
+    return VariantDecision(D_ID, PASS)
+
+
 REGISTRY = {
+    CPLUS_ID: cplus,
+    D_ID: var_d,
     "Str.3 Pro.1": pro1, "Str.3 Pro.2": pro2, "Str.3 Pro.3": pro3, "Str.3 Pro.4": pro4,
     "Str.3 Pro.5": pro5, "Str.3 Pro.6": pro6, "Str.3 Pro.7": pro7, "Str.3 Pro.8": pro8,
 }

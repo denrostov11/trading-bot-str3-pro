@@ -22,7 +22,7 @@ matplotlib.rcParams["font.family"] = "DejaVu Sans"
 
 COL = {"up": "#1a9e5c", "down": "#c0392b", "action": "#0f766e", "safety": "#d97706", "entry": "#1f2d4d",
        "stop": "#c0392b", "target": "#16a34a", "cplus": "#6d3fc0", "grey": "#6b7280", "grid": "#e5e7eb",
-       "post": "#f3f4f6", "brk": "#fde68a", "text": "#111827"}
+       "post": "#f3f4f6", "brk": "#fde68a", "text": "#111827", "bias": "#6b7280"}
 TF_FMT = {"M": "%m/%Y", "W": "%d.%m.%y", "D": "%d.%m.%y", "4h": "%d.%m. %Hh", "1h": "%d.%m. %Hh"}
 
 
@@ -54,6 +54,19 @@ def _spread_labels(items, y_lo, y_hi, min_gap_frac=0.055):
     return out
 
 
+def draw_empty(ax, text, tf):
+    """Chart ohne Kerzen: leere Achsen mit Hinweistext ("keine Daten")."""
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.text(0.5, 0.5, text, transform=ax.transAxes, ha="center", va="center", fontsize=11, color=COL["grey"],
+            bbox=dict(boxstyle="round,pad=0.5", fc="white", ec=COL["grey"], lw=0.8))
+    for s in ax.spines.values():
+        s.set_color("#d1d5db")
+    return {"n": 0, "m": 0, "y": (0.0, 1.0)}
+
+
 def draw_chart(ax, spec):
     """spec:
       tf, closed (DataFrame, sichtbar), partial (dict|None), post (DataFrame|None),
@@ -67,6 +80,8 @@ def draw_chart(ax, spec):
     """
     closed = spec["closed"].reset_index(drop=True)
     n = len(closed)
+    if n == 0:
+        return draw_empty(ax, spec.get("empty_text") or "keine Daten", spec["tf"])
     xs = np.arange(n)
     parts = [closed]
     if spec.get("partial"):
@@ -88,8 +103,10 @@ def draw_chart(ax, spec):
         ax.text(px + 0.8, 0.012, spec.get("post_label", "nach dem Signal"), transform=ax.get_xaxis_transform(),
                 fontsize=6.4, color=COL["grey"], va="bottom")
     lo_v, hi_v = float(allb["Low"].min()), float(allb["High"].max())
-    for h in spec.get("hlines", []):
-        lo_v, hi_v = min(lo_v, h["y"]), max(hi_v, h["y"])
+    spec["hlines"] = [h for h in spec.get("hlines", []) if h.get("y") is not None]
+    for h in spec["hlines"]:
+        if h.get("extend", True):                                  # extend=False: Linie darf ausserhalb des Bereichs liegen (Pfeil)
+            lo_v, hi_v = min(lo_v, h["y"]), max(hi_v, h["y"])
     pad = (hi_v - lo_v) * 0.06 or abs(hi_v) * 0.01 or 1.0
     y_lo, y_hi = lo_v - pad, hi_v + pad
     extra = spec.get("extra_right", 0)
@@ -111,10 +128,10 @@ def draw_chart(ax, spec):
         xe = L.get("x_end", m - 1)
         xx = np.arange(x0, xe + 1)
         yy = np.array([ln.value_at(x + off) for x in xx])
-        ax.plot(xx, yy, color=col, lw=1.5, zorder=4, solid_capstyle="round")
+        ax.plot(xx, yy, color=col, lw=L.get("lw", 1.5), ls=L.get("ls", "-"), zorder=4, solid_capstyle="round")
         for t in ln.taps:
             if 0 <= t - off < n:
-                ax.plot(t - off, ln.value_at(t), "o", ms=6.5, mfc="none", mec=col, mew=1.2, zorder=5)
+                ax.plot(t - off, ln.value_at(t), "o", ms=L.get("ms", 6.5), mfc="none", mec=col, mew=1.2, zorder=5)
         labels.append((float(yy[-1]), L["label"], col, True))
     # Linien des hoeheren Zeitrahmens (duenn gestrichelt)
     times = allb["Time"]
@@ -147,6 +164,9 @@ def draw_chart(ax, spec):
     if spec.get("empty_text"):
         ax.text(0.5, 0.93, spec["empty_text"], transform=ax.transAxes, ha="center", va="top", fontsize=9, color=COL["grey"],
                 bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=COL["grey"], lw=0.8))
+    for i, note in enumerate(spec.get("notes", [])):          # kurze Hinweise unten links (z. B. "keine gueltige Safety Line")
+        ax.text(0.012, 0.025 + 0.055 * i, note, transform=ax.transAxes, ha="left", va="bottom", fontsize=6.8, color=COL["grey"],
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="#d1d5db", lw=0.6, alpha=0.95), zorder=8)
     # Achsen
     k = 7
     pos = np.unique(np.linspace(0, m - 1, k).round().astype(int))
@@ -168,6 +188,7 @@ def legend_handles(items):
         "safety": Line2D([0], [0], color=COL["safety"], lw=1.6, label="Safety Line (Stop-Linie)"),
         "ov_action": Line2D([0], [0], color=COL["action"], lw=1.0, ls=(0, (4, 3)), label="Action Line des höheren Zeitrahmens"),
         "ov_safety": Line2D([0], [0], color=COL["safety"], lw=1.0, ls=(0, (4, 3)), label="Safety Line des höheren Zeitrahmens"),
+        "bias": Line2D([0], [0], color=COL["bias"], lw=1.0, ls=(0, (1, 2)), label="weitere Hauptlinie (Lage-Bewertung)"),
         "tap": Line2D([0], [0], marker="o", mfc="none", mec=COL["grey"], ls="", ms=6, label="Berührungspunkt (Tap)"),
         "break": Line2D([0], [0], marker="s", color=COL["brk"], ls="", ms=8, label="Bruchkerze"),
         "partial": Line2D([0], [0], marker="s", color="#c7d2cc", ls="", ms=8, label="unfertige Kerze (laufende Periode)"),
