@@ -76,9 +76,8 @@ def test_warning_goes_to_all_three_variant_groups_with_correct_text(tmp_path):
     assert out["checked"] == 1 and out["flagged"] == 1 and out["sent"] == 4
     assert tr.chats_used() == {"-101", "-102", "-103", "-106"} and "-999" not in tr.chats_used()
     t = tr.texts_to("-101")[0]
-    assert "Möglicher Bruch (30 Min. vor Schluss)" in t and "nur Vorwarnung, kein Einstieg" in t
-    assert "Kerze schließt um 13:00 Uhr (deutsche Zeit)" in t and "über der Linie" in t
-    assert "Paper-Trading - keine echte Order." in t
+    assert t.splitlines() == ["Vorwarnung · X-USD · LONG", "Kerze schließt um 13:00 Uhr", "Paper-Trading - keine echte Order."]
+    assert len(t) <= 140 and len(t.splitlines()) <= 3
     assert "Volumenfilter" in tr.texts_to("-103")[0] and "Volumenfilter" not in t
     st = json.load(open(tmp_path / "prewarn_state.json"))
     assert st["done_minutes"] == [30] and st["warnings"][0]["symbol"] == "X-USD"
@@ -90,7 +89,7 @@ def test_same_minute_not_repeated_and_second_warning_at_15(tmp_path):
     n = len(tr.sent)
     assert go(tmp_path, NOW30, 30, svc)["sent"] == 0 and len(tr.sent) == n          # selber Durchgang nicht doppelt
     out = go(tmp_path, NOW15, 15, svc)
-    assert out["sent"] == 4 and "15 Min. vor Schluss" in tr.texts_to("-102")[-1]
+    assert out["sent"] == 4 and "Kerze schließt um 13:00 Uhr" in tr.texts_to("-102")[-1]
 
 
 def test_nothing_flagged_sends_nothing(tmp_path):
@@ -158,7 +157,8 @@ def test_resolution_confirmed_and_not_confirmed(tmp_path):
     n = PW.resolve(str(tmp_path), datetime(2026, 3, 21, 12, 2, tzinfo=U), svc, watermark={"X-USD": "2026-03-21T08:00:00+00:00"})
     assert n == 4
     txt = tr.texts_to("-101")[-1]
-    assert "bestätigt – die Kerze hat die Linie durchbrochen" in txt and "nicht bestätigt" not in txt
+    assert txt.splitlines()[0] == "Vorwarnung 13:00 Uhr · X-USD · LONG: bestätigt" and "nicht bestätigt" not in txt
+    assert len(txt.splitlines()) == 2 and txt.splitlines()[1] == "Paper-Trading - keine echte Order."       # 1 Zeile Inhalt + Pflichthinweis
     # nur einmal
     assert PW.resolve(str(tmp_path), datetime(2026, 3, 21, 12, 20, tzinfo=U), svc, watermark={"X-USD": "2026-03-21T08:00:00+00:00"}) == 0
 
@@ -167,7 +167,7 @@ def test_resolution_not_confirmed_when_candle_closed_without_break(tmp_path):
     svc, tr = svc_for(tmp_path)
     go(tmp_path, NOW30, 30, svc)
     n = PW.resolve(str(tmp_path), datetime(2026, 3, 21, 12, 2, tzinfo=U), svc, watermark={"X-USD": "2026-03-21T08:00:00+00:00"})
-    assert n == 4 and "nicht bestätigt – die Kerze hat nicht jenseits der Linie geschlossen" in tr.texts_to("-102")[-1]
+    assert n == 4 and tr.texts_to("-102")[-1].splitlines()[0] == "Vorwarnung 13:00 Uhr · X-USD · LONG: nicht bestätigt"
 
 
 def test_resolution_overdue_without_data_is_not_confirmed(tmp_path):

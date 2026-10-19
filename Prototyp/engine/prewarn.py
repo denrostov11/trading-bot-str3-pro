@@ -3,9 +3,9 @@
 
 Pruefung: dieselbe Erkennung wie beim echten Trigger, aber auf den abgeschlossenen 4h-Kerzen PLUS der noch
 laufenden Kerze (Schlusskurs = aktueller Kurs). Liegt der Kurs gerade jenseits der Action Line (und existiert eine
-gueltige Safety Line), kommt die Meldung "Moeglicher Bruch, Kerze schliesst um ..., aktuell ... ueber/unter der
-Linie" in die jeweilige Varianten-Gruppe (Pro.1, Pro.3, C+; per Einstellung aenderbar). Nach dem Schluss folgt
-IMMER eine Aufloesung: "bestaetigt" oder "nicht bestaetigt".
+gueltige Safety Line), kommt die KURZE Meldung "Vorwarnung - Symbol - Richtung / Kerze schliesst um ..." (2-3 Zeilen)
+in die jeweilige Varianten-Gruppe (Pro.1, Pro.3, C+, D; per Einstellung aenderbar). Nach dem Schluss folgt
+IMMER eine Aufloesung in 1 Zeile: "bestaetigt" oder "nicht bestaetigt".
 
 Einstellungen (live_settings.json, bei jedem Durchlauf neu gelesen): an/aus, Zeitpunkte, Nachtruhe 23:00-07:00
 (keine Vorwarnungen, auch keine Aufloesungen dazu), Gruppen. Vorwarnungen veraendern NIE die Strategiebewertung:
@@ -77,18 +77,22 @@ def action_sig_of(action):
     return f"{action.kind}:{round(action.p0, 6)}:{round((action.p1 - action.p0) / (action.i1 - action.i0), 8)}"
 
 
-def warn_text(symbol, direction, boundary, price, line_value, atr, minute, sid):
-    from notify.trade_text import fde, fprice
-    above = price > line_value
-    dist = abs(price - line_value)
-    extra = ""
-    if sid == "Str.3 Pro.3":
-        extra = "\nHinweis: Der Volumenfilter dieser Variante wird erst zum Kerzenschluss geprüft."
-    return (f"Möglicher Bruch ({minute} Min. vor Schluss) – nur Vorwarnung, kein Einstieg\n"
-            f"{symbol}: Richtung {'LONG' if direction == 'LONG' else 'SHORT'} möglich\n"
-            f"Kerze schließt um {fde(boundary, False)} (deutsche Zeit)\n"
-            f"Aktuell {fprice(price)} – {fprice(dist)} ({dist / atr:.2f} ATR) {'über' if above else 'unter'} der Linie "
-            f"({fprice(line_value)})." + extra)
+def warn_title(symbol, direction):
+    return f"Vorwarnung · {symbol} · {'LONG' if direction == 'LONG' else 'SHORT'}"
+
+
+def warn_text(symbol, direction, boundary, sid):
+    """KURZ (2 Zeilen mit Kopfzeile + Paper-Hinweis aus render_text): Kopfzeile 'Vorwarnung · Symbol · Richtung', darunter
+    die Schlusszeit der Kerze. Kurs/Abstand/ATR gehoeren nicht mehr in die Meldung (nur Information, kein Einstieg)."""
+    from notify.trade_text import fde
+    extra = " · Volumenfilter erst dann geprüft" if sid == "Str.3 Pro.3" else ""
+    return f"Kerze schließt um {fde(boundary, False)}{extra}"
+
+
+def resolve_title(symbol, direction, boundary, result_txt):
+    """Aufloesung in 1 Zeile: 'Vorwarnung 14:00 Uhr · SOL-USD · LONG: bestaetigt'."""
+    return (f"Vorwarnung {_utc(boundary).tz_convert(TZ).strftime('%H:%M')} Uhr · {symbol} · "
+            f"{'LONG' if direction == 'LONG' else 'SHORT'}: {result_txt}")
 
 
 def merge_in_memory(cache, sym, df):
@@ -248,9 +252,9 @@ def run_prewarn(universe, base_dir, now, minute, settings, svc=None, downloader=
                 ok, _ = reg.get(sid).can_open(f["symbol"], f["action_sig"], now.timestamp())
                 if not ok:
                     continue                              # diese Variante koennte gar nicht einsteigen
-                body = warn_text(f["symbol"], f["direction"], boundary, f["price"], f["line"], f["atr"], minute, sid)
+                body = warn_text(f["symbol"], f["direction"], boundary, sid)
                 m = M.Message(sid, "v1", M.PREWARN, symbol=f["symbol"], signal_id=f"PW:{b_iso}:{f['symbol']}:{f['direction']}",
-                              body=body, title=f"{sid} – Vorwarnung")
+                              body=body, title=warn_title(f["symbol"], f["direction"]), compact=True)
                 try:
                     r = svc.send(m, period=f"pw{minute}")
                     if _delivered(r):
@@ -309,12 +313,11 @@ def resolve(base_dir, now, svc=None, settings=None, log=None, ledger=None, water
         confirmed = bool(c) and c.get("direction") == f["direction"]
         if confirmed:
             if c["status"] == "ACCEPTED_PROVISIONAL":
-                txt = "bestätigt – die Kerze hat die Linie durchbrochen, Signal erkannt (Trade wird gemeldet)."
+                txt = "bestätigt"
             else:
-                txt = f"bestätigt, aber abgelehnt ({c.get('rejection_reason') or c['status']})."
+                txt = f"bestätigt, aber abgelehnt ({c.get('rejection_reason') or c['status']})"
         else:
-            txt = ("nicht bestätigt – die Kerze hat nicht jenseits der Linie geschlossen." if evaluated
-                   else "nicht bestätigt – keine Bestätigung bis 45 Minuten nach Schluss (Daten verspätet).")
+            txt = "nicht bestätigt" if evaluated else "nicht bestätigt (Daten verspätet)"
         if svc is None or not getattr(svc, "enabled", False):
             continue                                          # Telegram aus -> spaeter erneut versuchen (nicht als erledigt markieren)
         from notify import messages as M
@@ -322,9 +325,9 @@ def resolve(base_dir, now, svc=None, settings=None, log=None, ledger=None, water
         for sid in f["sent_groups"]:
             if sid in f.setdefault("resolved_groups", []):
                 continue
-            body = f"{f['symbol']} ({f['direction']}): Vorwarnung von {boundary.tz_convert(TZ).strftime('%H:%M')} Uhr {txt}"
+            title = resolve_title(f["symbol"], f["direction"], boundary, txt)        # EINE Zeile (+ Paper-Hinweis)
             m = M.Message(sid, "v1", M.PREWARN_RESOLVED, symbol=f["symbol"],
-                          signal_id=f"PWR:{f['boundary']}:{key}", body=body, title=f"{sid} – Auflösung Vorwarnung")
+                          signal_id=f"PWR:{f['boundary']}:{key}", body="", title=title, compact=True)
             try:
                 r = svc.send(m, period="resolve")
                 if _delivered(r):

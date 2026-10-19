@@ -269,12 +269,16 @@ def _dtrade():
     return t
 
 
-def test_open_message_for_d_has_no_target_and_names_nachgezogener_stop():
+def test_open_message_for_d_has_no_target_and_names_ausstieg_nach_d():
     from notify import trade_text as TT
     q = {"price": 101.0, "bar_time": "2026-10-17T12:01:00+00:00", "interval": "1m", "delay_s": 0}
-    txt = TT.trade_opened_text(_dtrade(), quote=q, booked={"price": 100.0, "time": "2026-10-17T12:00:00+00:00", "partial": True})
-    assert "Ausstieg nach D (nachgezogener Stop" in txt and "Ziel:" not in txt and "Abstand Kurs zu Ziel" not in txt
-    assert "Aktueller Stop ≈ 89,5" in txt and "jede Berührung (auch ein Docht)" in txt
+    booked = {"price": 100.0, "time": "2026-10-17T12:00:00+00:00", "partial": True}
+    body = TT.trade_opened_text(_dtrade(), quote=q, booked=booked)
+    assert "Ausstieg nach D" in body and "Ziel:" not in body and "Details in der PDF" in body
+    # Details (frueher in der Meldung) stehen im Detailtext fuer den Rueckfall ohne PDF
+    det = TT.trade_details_text(_dtrade(), quote=q, booked=booked)
+    assert "Ausstieg nach D (nachgezogener Stop" in det and "Ziel:" not in det and "Abstand Kurs zu Ziel" not in det
+    assert "Aktueller Stop ≈ 89,5" in det and "jede Berührung (auch ein Docht)" in det
 
 
 def test_event_texts_for_d():
@@ -282,11 +286,12 @@ def test_event_texts_for_d():
     t = _dtrade()
     tr = {"id": "TRAIL:x", "kind": XC.EV_TRAIL, "time": "2026-10-17T20:00:00+00:00", "level": 109.5, "swing_price": 112.0,
           "swing_time": "2026-10-17T12:00:00+00:00"}
-    assert "Stop nachgezogen auf 109,5" in TT.cplus_event_text(t, tr)
+    assert TT.cplus_event_text(t, tr) == "Neuer Stop: 109,5" and "Stop nachgezogen" in TT.cplus_event_title(t, tr)
     t.result = {"netto_r": 0.9, "net_return_pct": 1.1, "entry_open": 100.0, "duration_days": 2.0, "d_swing": True}
     ex = {"id": "EXIT:x", "kind": XC.EV_EXIT, "time": "2026-10-18T08:00:00+00:00", "outcome": "STOP_INTRABAR", "price": 109.5}
+    assert "Ausstieg (Stop berührt)" in TT.cplus_event_title(t, ex)
     txt = TT.cplus_event_text(t, ex)
-    assert "Ausstieg (Stop berührt (Docht genügt))" in txt and "+0,90 R" in txt
+    assert "Kurs 109,5" in txt and "+0,90 R netto" in txt and len(txt.splitlines()) == 1
 
 
 def test_d_messages_go_to_the_pro6_group_with_titles(tmp_path):
@@ -300,7 +305,9 @@ def test_d_messages_go_to_the_pro6_group_with_titles(tmp_path):
     svc.cplus_event(t, {"id": "TRAIL:x", "kind": XC.EV_TRAIL, "time": "2026-10-17T20:00:00+00:00", "level": 109.5,
                         "swing_price": 112.0, "swing_time": "2026-10-17T12:00:00+00:00"})
     assert tr.chats_used() == {"-106"}
-    assert "Str.3 D – Stop nachgezogen" in tr.texts_to("-106")[0] and "Paper-Trading - keine echte Order." in tr.texts_to("-106")[0]
+    txt = tr.texts_to("-106")[0]
+    assert txt.splitlines()[0] == "D · X · LONG · Stop nachgezogen" and "Neuer Stop: 109,5" in txt
+    assert txt.endswith("Paper-Trading - keine echte Order.")
 
 
 def test_report_has_d_as_fourth_group_large(tmp_path):

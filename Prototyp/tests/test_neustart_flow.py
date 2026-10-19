@@ -86,10 +86,13 @@ def test_open_message_waiting_for_entry_and_quiet_system_group(tmp_path):
     # Meldungen nur in die Varianten-Gruppen (C+ -> Pro.2-Chat), NICHTS in die System-Gruppe
     assert tr.chats_used() <= {"-101", "-102", "-103", "-106"} and "-999" not in tr.chats_used()
     txt = tr.texts_to("-101")[0]
-    assert "wartet auf Einstieg" in txt and "Signal-Kerze geschlossen: 21.03.2026 01:00 Uhr (MEZ)" in txt
-    assert "Aktueller Kurs: 100,5" in txt and "Abstand Kurs zu Stop" in txt and "Paper-Trading - keine echte Order." in txt
+    ln = txt.splitlines()
+    # KURZ: Variante/Symbol/Richtung, Einstieg (Zeit + Kurs), Stop, Ziel, PDF-Hinweis, Paper-Hinweis (alles andere steht in der PDF)
+    assert ln[0] == "Pro.1 · X-USD · LONG" and ln[1] == "Einstieg: ab 21.03. 01:00 Uhr · Kurs folgt"
+    assert ln[2].startswith("Stop: ") and ln[3].startswith("Ziel: ")
+    assert ln[4] == "Details in der PDF" and ln[5] == "Paper-Trading - keine echte Order." and len(ln) == 6
     ctxt = tr.texts_to("-102")[0]
-    assert "Ausstieg nach C+" in ctxt and "Notfallnetz" in ctxt and "Abstand Kurs zu Ziel" not in ctxt
+    assert ctxt.splitlines()[0] == "C+ · X-USD · LONG" and "Ausstieg nach C+" in ctxt and "Ziel:" not in ctxt and "Notfallnetz" not in ctxt
     for t in store.trades:
         assert t.notif.get("opened") and t.realistic["price"] == 100.5 and t.signal_end_time.startswith("2026-03-21T00:00")
 
@@ -107,7 +110,7 @@ def test_booked_entry_when_next_candle_already_open(tmp_path):
     svc, tr = mk_svc(tmp_path)
     run(tmp_path, svc, hours=120 * 4 + 1)                        # 1h-Kerze 00:00 der Folgekerze liegt schon vor
     txt = tr.texts_to("-101")[0]
-    assert "Status: Einstieg gebucht" in txt and "gebuchter Kurs 100" in txt
+    assert "Einstieg: 21.03. 01:00 Uhr · Kurs 100" in txt and "Kurs folgt" not in txt and len(txt.splitlines()) == 6
     store = PaperTradeStore(str(tmp_path / "rt" / "trades.json"))
     assert all(t.booked_entry.get("price") == 100.0 for t in store.trades)
 

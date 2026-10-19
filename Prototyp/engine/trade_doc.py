@@ -85,8 +85,17 @@ def _make_pdf(rt, t, ledger, cache, timeout_s, log, worker=None):
     live = None
     rz = t.realistic or {}
     if rz.get("price"):
-        live = {"price": rz["price"], "time": rz.get("quote_time")}
-    args = {"trade": asdict(t), "snapshot": snap, "h1_path": h1_path, "out": out, "live": live,
+        live = {"price": rz["price"], "time": rz.get("quote_time"), "sent_at": rz.get("sent_at"),
+                "interval": rz.get("interval"), "delay_s": rz.get("delay_s")}
+    tr = asdict(t)
+    be = t.booked_entry or {}
+    if be.get("price"):                                   # PDF zeigt denselben gebuchten Einstieg (Zeit + Kurs) wie die Meldung
+        tr["entry_price"] = be["price"]
+        tr["entry_time"] = be.get("time") or tr.get("entry_time")
+    if t.exit_mode in ("CPLUS", "D"):                     # aktuelle Schwelle/Stop (zum Einstieg) fuer die Beschreibung
+        from notify.trade_text import initial_cplus_levels
+        tr["exit_level"] = initial_cplus_levels(t)
+    args = {"trade": tr, "snapshot": snap, "h1_path": h1_path, "out": out, "live": live,
             "budget_s": max(10.0, float(timeout_s) - 5.0)}
     ctx = mp.get_context("spawn")
     q = ctx.Queue()

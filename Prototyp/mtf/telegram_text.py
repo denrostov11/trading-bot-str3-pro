@@ -7,8 +7,12 @@ telegram_draft(A)     Nachricht unter der PDF (< 1024 Zeichen, passt als Telegra
 telegram_text         Alias von telegram_draft
 
 Beide enthalten: Variante, Symbol, Richtung, Schlusszeit der Signal-Kerze und Einstiegszeit (deutsche Zeit), gebuchten
-Einstiegskurs, Stop, Ziel (bzw. "kein festes Ziel - Ausstieg nach C+"), 1R, ATR, Top-down-Ergebnis, Grund und - wenn vom
-Aufrufer geliefert - live_info (aktueller Kurs, Stand in R, Abstaende). Paper-Trading-Hinweis ist immer enthalten."""
+Einstiegskurs, Stop, Ziel (bzw. "kein festes Ziel - Ausstieg nach C+/D"), 1R, ATR, Top-down-Ergebnis, Grund und - wenn vom
+Aufrufer geliefert - live_info (aktueller Kurs, Stand in R, Abstaende). Paper-Trading-Hinweis ist immer enthalten.
+
+Seit 19.10.2026 traegt die Kurzbeschreibung (PDF S.3) ALLE Angaben, die aus der kurzen Telegram-Eroeffnungsmeldung entfernt
+wurden: Status (gebucht / wartet), aktueller Kurs beim Versand samt Uhrzeit, Abstaende zu Einstieg/Stop/Ziel (bzw. Schwelle/
+Stop bei C+/D) in Preis und R, Datenverzoegerung, realistischer Einstieg, Ausstiegsregel C+/D, parent_signal_id."""
 import pandas as pd
 from .trade_pdf import fde, fde_de, fnum, fprice
 
@@ -43,6 +47,12 @@ def _reason_short(A):
     return f"4h-Schluss bricht {kind} ({len(A['action'].taps)} Taps)" + (f", Safety Line {len(s.taps)} Taps" if s is not None else "")
 
 
+def _mode(A):
+    """Ausstiegsmodus des Trades: '' (Ziel/Stop), 'CPLUS' oder 'D'."""
+    m = (A.get("trade") or {}).get("exit_mode") or ""
+    return "CPLUS" if (m == "CPLUS" or (not m and A.get("c_plus"))) else m
+
+
 def _flags(A):
     it = A["td"]["items"]
     return f"Monat {MARK[it['M']['supports']]} · Woche {MARK[it['W']['supports']]} · Tag {MARK[it['D']['supports']]} · 4h {MARK[it['4h']['supports']]}"
@@ -53,6 +63,11 @@ def _goal(A, short=False):
     if A["target"] is not None:
         rr = abs(A["target"] - A["E"]) / A["risk"] if A["risk"] else 0.0
         return f"{fprice(A['target'])}" + ("" if short else f" (nächste Unterstützungs-/Widerstandszone) → Ziel = {fnum(rr, 2)} R")
+    if _mode(A) == "D":
+        if short:
+            return "kein festes Ziel – Ausstieg nach D"
+        return ("kein festes Ziel – Ausstieg nach D (Stop 0,1 ATR jenseits der mitwandernden Safety Line, am bestätigten "
+                f"Zwischen{'tief' if A['direction'] == 'LONG' else 'hoch'} nachgezogen; jede Berührung, auch ein Docht, löst aus)")
     if A.get("c_plus"):
         r2 = fnum(A["c_plus"]["stage2_r"], 1)
         if short:
@@ -66,7 +81,8 @@ def _entry_line(A, short=False):
     t = fde_de(A["entry_time"])
     if A.get("entry_booked"):
         px = fprice(A["booked_price"])
-        lab = "gebucht"
+        part = ((A.get("trade") or {}).get("booked_entry") or {}).get("partial")
+        lab = "gebucht, Open der Folgekerze" + (" – Kerze läuft noch" if part else "")
     else:
         px = fprice(A["E"])
         lab = "erwartet, Eröffnung der nächsten 4h-Kerze"
@@ -88,35 +104,107 @@ def _live_line(A, short=False):
     return " · ".join(parts)
 
 
+LABEL_W = 18                                    # Spaltenbreite der Beschriftung (muss zum Einzug in trade_pdf.make_trade_pdf passen)
+STRONG_DEVIATION_R = 0.5                         # ab dieser Abweichung vom Einstieg (in R) wird ausdruecklich gewarnt
+DELAY_NOTE_S = 120                               # ab dieser Verzoegerung wird sie als Minutenwert genannt
+
+
+def _row(label, text):
+    return f"{label:<{LABEL_W}}: {text}"
+
+
+def _hm(ts):
+    """'14:03 MESZ' (deutsche Zeit, nur Uhrzeit)."""
+    return fde_de(ts)[11:]
+
+
+def _dist(diff, risk):
+    """Preisabstand mit Vorzeichen und in R: '+1,3288 (+1,06 R)'."""
+    sg = "+" if diff >= 0 else "−"
+    r = f" ({fnum(diff / risk, 2, True)} R)" if risk else ""
+    return f"{sg}{fprice(abs(diff))}{r}"
+
+
+def _live_rows(A):
+    """Zeilen zum Zeitpunkt des Versands: aktueller Kurs (mit Uhrzeit), Abstaende in Preis und R, Datenverzoegerung,
+    realistischer Einstieg. Ohne Kurs: 'nicht verfuegbar' (nichts erfinden)."""
+    li = A.get("live_info")
+    t = A.get("trade") or {}
+    mode = _mode(A)
+    long = A["direction"] == "LONG"
+    sg = 1.0 if long else -1.0
+    risk, E = A["risk"], A["E"]
+    if not li:
+        return [_row("Aktueller Kurs", "nicht verfügbar"), _row("Realist. Einstieg", "nicht verfügbar")]
+    cur = li["price"]
+    bits = [f"Kursbalken {_hm(li['time'])}"] if li.get("time") is not None else []
+    if li.get("sent_at"):
+        bits.append(f"Versand {_hm(li['sent_at'])}")
+    if li.get("interval"):
+        bits.append(f"{li['interval']}-Daten")
+    rows = [_row("Aktueller Kurs", fprice(cur) + (f" ({', '.join(bits)})" if bits else ""))]
+    rows.append(_row("Abstand Einstieg", _dist(sg * (cur - E), risk)))
+    rows.append(_row("Abstand Stop", _dist(sg * (cur - A["stop0"]), risk)))
+    lv = t.get("exit_level") or {}
+    if mode in ("CPLUS", "D") and lv.get("threshold") is not None:
+        rows.append(_row("Abstand akt. Stop" if mode == "D" else "Abstand Schwelle", _dist(sg * (cur - lv["threshold"]), risk)))
+    elif A["target"] is not None:
+        rows.append(_row("Abstand Ziel", _dist(sg * (A["target"] - cur), risk)))
+    ds = li.get("delay_s")
+    if ds is not None:
+        rows.append(_row("Datenverzögerung", f"ca. {int(round(float(ds) / 60))} Min. (letzter Kursbalken {_hm(li['time'])})"
+                         if float(ds) >= DELAY_NOTE_S and li.get("time") is not None else "keine messbare"))
+    rows.append(_row("Realist. Einstieg", f"{fprice(cur)} (Kurs beim Versand{', ' + _hm(li['sent_at']) if li.get('sent_at') else ''}) – "
+                     "zusätzlich gespeichert; gewertet wird der theoretische Einstieg (Open der Folgekerze)"))
+    if risk and abs(cur - E) / risk >= STRONG_DEVIATION_R:
+        worse = sg * (cur - E) > 0                # Kurs schon in Gewinnrichtung gelaufen -> spaeterer Einstieg ungünstiger
+        rows.append(_row("Abweichung", f"Kurs weicht bereits {fnum(abs(cur - E) / risk, 2)} R vom Einstieg ab "
+                         f"({'ungünstig' if worse else 'günstig'} für einen späteren Einstieg)"))
+    rows.append(_row("Vorzeichen", "Einstieg + = Kurs in Gewinnrichtung; Stop/Ziel/Schwelle + = noch nicht erreicht"))
+    return rows
+
+
 def description(A):
-    """Kurzbeschreibung des Trades (S.3 der PDF)."""
+    """Kurzbeschreibung des Trades (S.3 der PDF) - traegt ALLE Angaben der frueheren, ausfuehrlichen Telegram-Meldung."""
     t = A["trade"]
     long = A["direction"] == "LONG"
+    mode = _mode(A)
     te, px, lab = _entry_line(A)
+    status = ("Einstieg gebucht" if A.get("entry_booked")
+              else "wartet auf Einstieg (Folgekerze noch nicht eröffnet, z. B. Markt geschlossen)")
     lines = [
-        f"Symbol / Richtung : {t['symbol']} · {A['direction']} ({'Kauf' if long else 'Verkauf'}) · Variante {_variant(A)}",
-        f"Signal-Kerze      : Schluss {fde_de(A['cutoff'])} (4h-Kerze {pd.Timestamp(A['sig_start']).strftime('%H:%M')}–{pd.Timestamp(A['cutoff']).strftime('%H:%M')} UTC)",
-        f"Grund             : {_reason(A)}",
-        f"Einstieg          : {te} · Kurs {px} ({lab})",
-        f"Stop              : {fprice(A['stop0'])} (Safety Line bei Kerze Bruch+4, fest) → 1R = {fprice(A['risk'])} ({fnum(A['risk'] / A['E'] * 100, 2)} % vom Einstieg)",
-        f"Ziel              : {_goal(A)}",
-        f"ATR (14, 4h)      : {fprice(A['a'])} (= {fnum(A['a'] / A['risk'], 2) if A['risk'] else '–'} R)",
-        f"Top-down          : {A['td']['count']} von {A['td']['total']} Zeitrahmen stützen die Richtung ({_flags(A)})",
+        _row("Symbol / Richtung", f"{t['symbol']} · {A['direction']} ({'Kauf' if long else 'Verkauf'}) · Variante {_variant(A)}"),
+        _row("Status", status),
+        _row("Signal-Kerze", f"Schluss {fde_de(A['cutoff'])} (4h-Kerze {pd.Timestamp(A['sig_start']).strftime('%H:%M')}–{pd.Timestamp(A['cutoff']).strftime('%H:%M')} UTC)"),
+        _row("Grund", _reason(A)),
+        _row("Einstieg", f"{te} · Kurs {px} ({lab})"),
+        _row("Stop", f"{fprice(A['stop0'])} (Safety Line bei Kerze Bruch+4, fest) → 1R = {fprice(A['risk'])} ({fnum(A['risk'] / A['E'] * 100, 2)} % vom Einstieg)"),
+        _row("Ziel", _goal(A)),
     ]
-    live = _live_line(A)
-    if live:
-        lines.append(f"Aktuell           : {live}")
+    lv = t.get("exit_level") or {}
+    if mode in ("CPLUS", "D") and lv.get("threshold") is not None:
+        if mode == "D":
+            lines.append(_row("Aktueller Stop", f"≈ {fprice(lv['threshold'])} (bei Einstieg)"))
+        else:
+            lines.append(_row("Aktuelle Schwelle", f"≈ {fprice(lv['threshold'])} (bei Einstieg) · Notfallnetz ≈ {fprice(lv['net'])}"))
+    lines += [
+        _row("ATR (14, 4h)", f"{fprice(A['a'])} (= {fnum(A['a'] / A['risk'], 2) if A['risk'] else '–'} R)"),
+        _row("Top-down", f"{A['td']['count']} von {A['td']['total']} Zeitrahmen stützen die Richtung ({_flags(A)})"),
+    ]
+    lines += _live_rows(A)
+    if t.get("parent_signal_id"):
+        lines.append(_row("parent_signal_id", t["parent_signal_id"]))
     if A.get("ist") is not None and A["ist"].get("netto_r") is not None:
         ist = A["ist"]
-        lines.append(f"Ausgang IST       : {OUTCOME_DE.get(ist['outcome'], ist['outcome'])} am {fde(ist['exit_time'], False)}, "
-                     f"{fnum(ist['netto_r'], 2, True)} R netto ({fnum(ist['net_pct'], 2, True)} %)")
+        lines.append(_row("Ausgang IST", f"{OUTCOME_DE.get(ist['outcome'], ist['outcome'])} am {fde(ist['exit_time'], False)}, "
+                     f"{fnum(ist['netto_r'], 2, True)} R netto ({fnum(ist['net_pct'], 2, True)} %)"))
         if A.get("cplus_r") is not None:
-            lines.append(f"Ausgang C+ (Muster): {OUTCOME_DE.get(A['cplus']['exit']['outcome'])} am {fde(A['cplus_exit_time'], False)}, "
+            lines.append(_row("Ausgang C+ Muster", f"{OUTCOME_DE.get(A['cplus']['exit']['outcome'])} am {fde(A['cplus_exit_time'], False)}, "
                          f"{fnum(A['cplus_r'], 2, True)} R netto ({fnum(A['cplus_pct'], 2, True)} %)"
                          f"; Stufe 2 {'erreicht' if A['cplus']['stage2_idx'] is not None else 'nicht erreicht'}, "
-                         f"{len(A['cplus']['swings'])} Swing-Schwelle(n)")
+                         f"{len(A['cplus']['swings'])} Swing-Schwelle(n)"))
         else:
-            lines.append("Ausgang C+ (Muster): bis zum letzten verfügbaren Kurs noch offen (nicht gewertet)")
+            lines.append(_row("Ausgang C+ Muster", "bis zum letzten verfügbaren Kurs noch offen (nicht gewertet)"))
     lines.append("")
     if A.get("muster"):
         lines.append("MUSTER – fiktiver Trade aus dem Paper-Test. Paper-Trading – keine echte Order, keine Anlageberatung.")

@@ -198,6 +198,9 @@ def _norm_live(li, E, stop0, target, risk, direction):
     else:
         out["dist_target"] = None
     out["pnl_pct"] = float(li["pnl_pct"]) if li.get("pnl_pct") is not None else (sg * (price - E) / E * 100 if E else None)
+    for k in ("sent_at", "interval", "delay_s"):          # Angaben zum Versandzeitpunkt (Beschreibung S.3)
+        if li.get(k) is not None:
+            out[k] = li[k]
     return out
 
 
@@ -337,6 +340,8 @@ def build_specs(A):
         s4["empty_text"] = "keine Daten"
     if A.get("c_plus"):
         s4["notes"].append("kein festes Ziel – Ausstieg nach C+")
+    elif (A.get("trade") or {}).get("exit_mode") == "D":
+        s4["notes"].append("kein festes Ziel – Ausstieg nach D")
     if A["post"] is not None and len(A["post"]):
         cp, ist = A["cplus"], A["ist"]
         s4["post"] = A["post"]
@@ -525,6 +530,8 @@ def _levels_text(A):
         goal = f"Ziel {fprice(A['target'])}"
     elif A.get("c_plus"):
         goal = f"kein festes Ziel – Ausstieg nach C+ (+{fnum(A['c_plus']['stage2_r'], 1)} R bei {fprice(A['stage2_price'])})"
+    elif (A.get("trade") or {}).get("exit_mode") == "D":
+        goal = "kein festes Ziel – Ausstieg nach D (nachgezogener Stop)"
     else:
         goal = "kein Ziel angegeben"
     return (f"Einstieg {fprice(A['E'])} · Stop {fprice(A['stop0'])} (1R = {fprice(A['risk'])}) · {goal} · ATR {fprice(A['a'])}")

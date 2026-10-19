@@ -317,7 +317,7 @@ def _trade(direction="LONG", mode=""):
                                                   ("SHORT", 95.0, "ungünstig"), ("SHORT", 105.0, "günstig")])
 def test_late_entry_deviation_is_labelled_correctly(direction, cur, expect):
     q = {"price": cur, "bar_time": "2026-10-17T12:01:00+00:00", "interval": "1m", "delay_s": 0}
-    txt = TT.trade_opened_text(_trade(direction), quote=q, booked={"price": 100.0, "time": "2026-10-17T12:00:00+00:00", "partial": True})
+    txt = TT.trade_details_text(_trade(direction), quote=q, booked={"price": 100.0, "time": "2026-10-17T12:00:00+00:00", "partial": True})
     line = [x for x in txt.splitlines() if "weicht bereits" in x][0]
     assert f"({expect} für einen späteren Einstieg)" in line
     if expect == "günstig":
@@ -507,15 +507,16 @@ def test_d_trail_event_only_when_effective_stop_tightens():
     assert XD.current_levels(st, "LONG", lambda j: 90.0, 11, 5.0)[0] == 89.5   # gemeldeter/wirksamer Stop = tatsaechlicher Stop
 
 
-def test_short_trailing_texts_use_plus_half_atr_for_d_and_cplus():
-    for mode, key in (("D", "Stop = Swing +0,5 ATR"), ("CPLUS", "Schwelle = Swing +0,5 ATR")):
+def test_trailing_texts_are_short_and_show_new_level_for_d_and_cplus():
+    for mode, key in (("D", "Neuer Stop: 90,5"), ("CPLUS", "Neue Schwelle: 90,5")):
         t = _trade("SHORT", mode)
         t.strategy_id = "Str.3 D" if mode == "D" else "Str.3 C+"
         ev = {"id": "TRAIL:x", "kind": XC.EV_TRAIL, "time": "2026-10-17T20:00:00+00:00", "level": 90.5, "swing_price": 90.0,
               "swing_time": "2026-10-17T12:00:00+00:00"}
-        assert key in TT.cplus_event_text(t, ev)
-        t.direction = "LONG"
-        assert key.replace("+0,5", "−0,5") in TT.cplus_event_text(t, ev)
+        for d in ("SHORT", "LONG"):
+            t.direction = d
+            assert TT.cplus_event_text(t, ev) == key and len(TT.cplus_event_text(t, ev).splitlines()) == 1      # 1 Zeile, Kernzahl
+            assert "nachgezogen" in TT.cplus_event_title(t, ev) and t.direction in TT.cplus_event_title(t, ev)
 
 
 def test_cutover_first_cycle_with_only_fetch_failures_is_rejected(tmp_path):

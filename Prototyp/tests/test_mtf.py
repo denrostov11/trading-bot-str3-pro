@@ -403,7 +403,8 @@ def test_live_mode_no_outcome_no_data_pdf_and_texts(tmp_path):
 def test_live_info_derived_values_and_optional():
     h1, trade = _synthetic()
     A = TP.analyse(trade, None, h1, None, 0.0005)
-    assert A["live_info"] is None and "Aktuell" not in TT.description(A)                  # ohne live_info nichts erfunden
+    assert A["live_info"] is None and "Aktueller Kurs    : nicht verfügbar" in TT.description(A)   # ohne live_info nichts erfunden
+    assert "Abstand" not in TT.description(A)
     assert A["target"] == 103.0 and "Ziel: 103" in TT.telegram_draft(A)
     A = TP.analyse(trade, None, h1, None, 0.0005, live_info={"price": 101.5})
     li = A["live_info"]

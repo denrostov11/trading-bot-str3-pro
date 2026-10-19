@@ -69,6 +69,8 @@ class TradeNotifier:
                     if doc:
                         self.svc.trade_attachment(t, doc)
                         sent_any = True
+                    if not (doc and str(doc).lower().endswith(".pdf")):
+                        sent_any |= self._send_details(t)          # keine PDF -> Details als zweite, getrennte Nachricht
                     t.notif = {**(t.notif or {}), "doc": self.clock().isoformat()}
                     self.trades._save()
                 except Exception as e:
@@ -121,6 +123,22 @@ class TradeNotifier:
             t.notif = {**(t.notif or {}), "closed": now.isoformat()}
             sent = True
         return sent
+
+    def _send_details(self, t):
+        """Rueckfall ohne Trade-PDF: ausfuehrlicher Text (frueherer Meldungsinhalt) als ZWEITE Nachricht, aus den am Trade
+        gespeicherten Werten (gebuchter Einstieg, realistischer Einstieg = Kurs beim Versand)."""
+        fn = getattr(self.svc, "trade_details", None)
+        if fn is None:
+            return False
+        rz = t.realistic or {}
+        quote = None
+        if rz.get("price") is not None:
+            quote = {"price": rz["price"], "bar_time": rz.get("quote_time"), "interval": rz.get("interval") or "",
+                     "delay_s": rz.get("delay_s"), "fetched_at": rz.get("sent_at")}
+        be = t.booked_entry or {}
+        booked = {"price": be["price"], "time": be["time"], "partial": be.get("partial", False)} if be.get("price") else None
+        fn(t, quote=quote, booked=booked)
+        return True
 
     def _doc(self, t):
         key = (t.parent_signal_id, t.exit_mode or "BASE")        # Pro.1/Pro.3 (Ziel) und C+ (kein Ziel) bekommen eigene Anhaenge

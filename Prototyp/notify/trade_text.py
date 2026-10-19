@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Texte der Trade-Meldungen (A4). Reine Formatierung vorhandener, lokal gespeicherter Werte - keine
+"""Texte der Trade-Meldungen. Reine Formatierung vorhandener, lokal gespeicherter Werte - keine
 Strategieberechnung. ALLE Zeiten in deutscher Zeit (Europe/Berlin, MEZ/MESZ).
 
-Inhalt der Eroeffnungsmeldung:
-- Schlusszeit der Signal-Kerze, Einstiegszeit, gebuchter Einstiegskurs ("Einstieg gebucht") bzw.
-  "wartet auf Einstieg"
-- aktueller Kurs beim Versand mit Uhrzeit, Datenverzoegerung (falls messbar)
-- Abstand des aktuellen Kurses zu Einstieg, Stop und Ziel - jeweils in Preis und in R
-  (bei C+ statt Ziel: "Ausstieg nach C+" mit aktueller Schwelle und Notfallnetz)
+KURZFORM (Standard, ab 19.10.2026 - Telegram-Meldungen sind bewusst kurz, alle Details stehen in der Trade-PDF):
+- Eroeffnung: Kopfzeile "<Variante> · <Symbol> · <Richtung>", Einstieg (Uhrzeit + Kurs), Stop, Ziel (bzw. "Ausstieg
+  nach C+" / "Ausstieg nach D"), "Details in der PDF" (+ Paper-Trading-Hinweis aus messages.render_text)
+- Ereignisse (C+/D: Stufe 2, Schwelle/Stop nachgezogen, Ausstieg; Pro.1/Pro.3: Ergebnis): 1-2 Zeilen mit der Kernzahl
+
+DETAILTEXT (trade_details_text): der fruehere ausfuehrliche Eroeffnungstext (Signal-Schluss, Status, aktueller Kurs,
+Abstaende in Preis und R, Datenverzoegerung, realistischer Einstieg, parent_signal_id ...). Er geht NUR als zweite,
+getrennte Nachricht raus, wenn die Trade-PDF nicht erstellt werden konnte (Rueckfall PNG/kein Anhang).
 """
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -88,9 +90,9 @@ def initial_cplus_levels(t):
         return None
 
 
-def trade_opened_text(t, quote=None, booked=None):
-    """Text der Eroeffnungsmeldung. quote = livequote.fetch_quote-Ergebnis (oder None), booked =
-    entry_booking.book_entry-Ergebnis (oder None = wartet auf Einstieg)."""
+def trade_details_text(t, quote=None, booked=None):
+    """AUSFUEHRLICHER Eroeffnungstext (Rueckfall, wenn keine PDF entsteht). quote = livequote.fetch_quote-Ergebnis
+    (oder None), booked = entry_booking.book_entry-Ergebnis (oder None = wartet auf Einstieg)."""
     long = t.direction == "LONG"
     sgn = 1.0 if long else -1.0
     sig_close = (t.booked_entry or {}).get("signal_close")
@@ -111,7 +113,7 @@ def trade_opened_text(t, quote=None, booked=None):
     cur = quote["price"] if quote else None
     if quote:
         lines.append(f"Aktueller Kurs: {fprice(cur)} (Stand {fde(quote['bar_time'], False)}, "
-                     f"Versand {fde(datetime.now(timezone.utc), False)}, {quote['interval']}-Daten)")
+                     f"Versand {fde(quote.get('fetched_at') or datetime.now(timezone.utc), False)}, {quote['interval']}-Daten)")
     else:
         lines.append("Aktueller Kurs: nicht verfügbar")
 
@@ -161,61 +163,95 @@ def trade_opened_text(t, quote=None, booked=None):
     return "\n".join(lines)
 
 
-def cplus_event_text(t, ev):
-    """Text zu einem C+-Ereignis (Stufe 2 / Schwelle nachgezogen / Ausstieg)."""
-    from engine import exit_cplus as XC
-    long = t.direction == "LONG"
-    kind = ev["kind"]
-    when = fde(ev.get("time"))
+# ------------------------------------------------------------------ KURZFORM (Telegram)
+def fshort(ts):
+    """'17.08. 14:00 Uhr' (deutsche Zeit, ohne Jahr/Zone - die Meldung ist ohnehin aktuell)."""
+    d = to_de(ts)
+    return "–" if d is None else f"{d.strftime('%d.%m. %H:%M')} Uhr"
+
+
+def trade_head(t, suffix=""):
+    """Kopfzeile: '<Variante> · <Symbol> · <Richtung>[ · Zusatz]' (z. B. 'Pro.1 · SOL-USD · LONG')."""
+    return f"{strategy_short(t.strategy_id)} · {t.symbol} · {t.direction}" + (f" · {suffix}" if suffix else "")
+
+
+def trade_opened_title(t):
+    return trade_head(t)
+
+
+def trade_opened_text(t, quote=None, booked=None):
+    """KURZE Eroeffnungsmeldung (ohne Kopfzeile und Paper-Hinweis, die kommen aus trade_opened_title bzw.
+    messages.render_text): Einstieg (Uhrzeit + Kurs), Stop, Ziel bzw. Ausstiegsregel, Hinweis auf die PDF.
+    `quote` wird fuer die Kurzform nicht gebraucht (aktueller Kurs steht in der PDF)."""
+    if booked and booked.get("price") is not None:
+        entry = f"Einstieg: {fshort(booked['time'])} · Kurs {fprice(booked['price'])}"
+    else:                                           # Folgekerze noch nicht eroeffnet (z. B. Markt zu)
+        entry = f"Einstieg: ab {fshort(t.signal_end_time or t.signal_time)} · Kurs folgt"
     if t.exit_mode == "D":
-        return _d_event_text(t, ev, long, when)
-    if kind == XC.EV_STAGE2:
-        return ("\n".join([
-            f"{t.direction} · Stufe 2 erreicht (Schluss ≥ +1,5 R)",
-            f"Kerze: {when}",
-            f"Gewinnschwelle jetzt: Einstand + Kosten = {fprice(ev.get('level'))}",
-            "Ausstieg, sobald eine 4h-Kerze jenseits der günstigeren Schwelle (Safety Line oder Gewinnschwelle) schließt.",
-            f"parent_signal_id: {t.parent_signal_id}"]))
-    if kind == XC.EV_TRAIL:
-        return ("\n".join([
-            f"{t.direction} · Schwelle nachgezogen auf {fprice(ev.get('level'))}",
-            f"Bestätigtes Zwischen{'tief' if long else 'hoch'} {fprice(ev.get('swing_price'))} "
-            f"(Kerze {fde(ev.get('swing_time'))}), Bestätigung {when}",
-            f"Schwelle = Swing {'−' if long else '+'}0,5 ATR (nur in Gewinnrichtung).",
-            f"parent_signal_id: {t.parent_signal_id}"]))
-    # Ausstieg
-    r = t.result or {}
-    reason = XC.EXIT_REASON_DE.get(ev.get("outcome"), ev.get("outcome"))
-    return ("\n".join([
-        f"{t.direction} · Ausstieg ({reason})",
-        f"Ausstieg: {when} · Kurs {fprice(ev.get('price'))}",
-        f"Ergebnis: {fsign(r.get('netto_r', 0.0))} R netto · {fsign(r.get('net_return_pct', 0.0))} % netto "
-        f"(Einstieg {fprice(r.get('entry_open'))})",
-        f"Dauer: {r.get('duration_days')} Tage · Stufe 2: {'ja' if r.get('cplus_stage2') else 'nein'} · "
-        f"Swing-Nachziehen: {'ja' if r.get('cplus_stage3') else 'nein'}",
-        f"parent_signal_id: {t.parent_signal_id}"]))
+        goal = "Ausstieg nach D"
+    elif t.exit_mode == "CPLUS":
+        goal = "Ausstieg nach C+"
+    else:
+        goal = f"Ziel: {fprice(t.target)}"
+    return "\n".join([entry,f"Stop: {fprice(t.stop_initial)}", goal, "Details in der PDF"])
 
 
-def _d_event_text(t, ev, long, when):
-    """Variante D: 'Stop nachgezogen auf ...' bzw. 'Ausstieg (Grund)'."""
-    from engine import exit_cplus as XC, exit_d as XD
-    if ev["kind"] == XC.EV_TRAIL:
-        return "\n".join([
-            f"{t.direction} · Stop nachgezogen auf {fprice(ev.get('level'))}",
-            f"Bestätigtes Zwischen{'tief' if long else 'hoch'} {fprice(ev.get('swing_price'))} "
-            f"(Kerze {fde(ev.get('swing_time'))}), Bestätigung {when}",
-            f"Stop = Swing {'−' if long else '+'}0,5 ATR (nur in Gewinnrichtung); es gilt der günstigere von Linien-Stop und Swing-Stop.",
-            f"parent_signal_id: {t.parent_signal_id}"])
+def trade_details_title(t):
+    return trade_head(t, "Details (PDF nicht verfügbar)")
+
+
+# ------------------------------------------------------------------ Ereignisse (C+/D und Ergebnis)
+_SHORT_REASON = {"NOTFALLNETZ": "Notfallnetz", "SAFETY_CLOSE": "Safety Line", "GEWINNSCHWELLE_CLOSE": "Gewinnschwelle",
+                 "STOP_INTRABAR": "Stop berührt", "TARGET": "Ziel erreicht", "STOP": "Stop getroffen",
+                 "BREAK_EVEN": "Break-even"}
+
+
+def reason_short(outcome):
+    return _SHORT_REASON.get(outcome, str(outcome))
+
+
+def _result_line(t, ev_time=None, ev_price=None):
+    """'20.08. 14:00 Uhr · Kurs 77,02 · +0,98 R netto (+1,62 %)' - alle Teile nur, wenn vorhanden."""
     r = t.result or {}
-    reason = XD.EXIT_REASON_DE.get(ev.get("outcome"), ev.get("outcome"))
-    return "\n".join([
-        f"{t.direction} · Ausstieg ({reason})",
-        f"Ausstieg: {when} · Kurs {fprice(ev.get('price'))}",
-        f"Ergebnis: {fsign(r.get('netto_r', 0.0))} R netto · {fsign(r.get('net_return_pct', 0.0))} % netto "
-        f"(Einstieg {fprice(r.get('entry_open'))})",
-        f"Dauer: {r.get('duration_days')} Tage · Stop am Zwischen{'tief' if long else 'hoch'} nachgezogen: "
-        f"{'ja' if r.get('d_swing') else 'nein'}",
-        f"parent_signal_id: {t.parent_signal_id}"])
+    parts = []
+    if ev_time or r.get("exit_time"):
+        parts.append(f"{fshort(ev_time or r.get('exit_time'))}")
+    px = ev_price if ev_price is not None else r.get("exit_price")
+    if px is not None:
+        parts.append(f"Kurs {fprice(px)}")
+    parts.append(f"{fsign(r.get('netto_r', 0.0))} R netto ({fsign(r.get('net_return_pct', 0.0))} %)")
+    return " · ".join(parts)
+
+
+def cplus_event_title(t, ev):
+    from engine import exit_cplus as XC
+    k = ev["kind"]
+    if k == XC.EV_STAGE2:
+        return trade_head(t, "Stufe 2 erreicht")
+    if k == XC.EV_TRAIL:
+        return trade_head(t, "Stop nachgezogen" if t.exit_mode == "D" else "Schwelle nachgezogen")
+    return trade_head(t, f"Ausstieg ({reason_short(ev.get('outcome'))})")
+
+
+def cplus_event_text(t, ev):
+    """Kurztext (Koerper ohne Kopfzeile) zu einem C+/D-Ereignis: die Kernzahl in 1 Zeile."""
+    from engine import exit_cplus as XC
+    k = ev["kind"]
+    if k == XC.EV_STAGE2:
+        return f"Neue Schwelle: {fprice(ev.get('level'))} (Einstand + Kosten)"
+    if k == XC.EV_TRAIL:
+        return f"Neuer Stop: {fprice(ev.get('level'))}" if t.exit_mode == "D" else f"Neue Schwelle: {fprice(ev.get('level'))}"
+    return _result_line(t, ev.get("time"), ev.get("price"))
+
+
+def closed_title(t):
+    r = t.result or {}
+    return trade_head(t, reason_short(r.get("outcome")))
+
+
+def closed_text(t):
+    """Kurztext zu einem geschlossenen Pro.1/Pro.3-Trade (Ziel / Stop / Break-even)."""
+    return _result_line(t)
 
 
 def realistic_vs_theoretical(t):

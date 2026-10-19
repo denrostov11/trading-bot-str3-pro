@@ -72,6 +72,7 @@ class Message:
     title: str = ""                      # optionaler eigener Kopf (statt "<strategy> (<version>) - <type>")
     target_chat_id: str = ""             # wird vom Router gesetzt
     created_at_utc: str = field(default_factory=_utcnow)
+    compact: bool = False                # Kurzform: KEINE "Instrument:"-Zeile (Symbol steht schon im Kopf/title)
 
     def __post_init__(self):
         if self.message_type not in ALL_TYPES:
@@ -91,7 +92,7 @@ class Message:
         KEINE Secrets, keine Berechnung - nur Darstellung uebergebener Werte."""
         head = self.title or f"{self.strategy_id} ({self.strategy_version}) - {self.message_type}"
         lines = [head]
-        if self.symbol and self.symbol != "-":
+        if self.symbol and self.symbol != "-" and not self.compact:
             lines.append(f"Instrument: {self.symbol}")
         if self.body:
             lines.append(self.body)
