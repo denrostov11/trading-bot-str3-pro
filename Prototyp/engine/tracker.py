@@ -95,12 +95,20 @@ def simulate_trade(direction, asset_class, atr, entry_open, stop_initial, target
         return {"status": "open", "mfe_r": round(mfe, 3), "mae_r": round(mae, 3),
                 "be_moved": be_moved, "stop_current": round(stop, 6), "duration_bars": dur}
 
+    return _result_block(direction, asset_class, atr, entry, fill, risk, slip, stop_initial,
+                         stop, target, exit_price, outcome, be_moved, mfe, mae, ambiguous, dur)
+
+
+def _result_block(direction, asset_class, atr, entry, fill, risk, slip, stop_initial,
+                  stop_final, target, exit_price, outcome, be_moved, mfe, mae, ambiguous, dur):
+    """EINZIGE Quelle der Ergebnis-/Kosten-/Prozentformeln (brutto aus entry_open; netto = brutto
+    minus Gebuehren + Slippage GENAU EINMAL). Genutzt von simulate_trade UND mark_to_market."""
+    long = direction == "LONG"
     move = (exit_price - entry) if long else (entry - exit_price)
-    brutto_r = move / risk                                   # echtes Brutto (aus entry_open)
+    brutto_r = move / risk
     fee = cost_fraction(asset_class)
     cost_price = 2 * slip + fee * (abs(entry) + abs(exit_price))   # Slippage 2 Seiten EINMAL + Gebuehren
     netto_r = brutto_r - cost_price / risk
-    # Prozentkennzahlen (zentrale Formeln; brutto aus entry_open, netto = brutto - fees - slippage EINMAL)
     gross_return_pct = move / entry * 100
     fees_pct = fee * 2 * 100
     slippage_pct = (2 * slip) / entry * 100
@@ -109,13 +117,29 @@ def simulate_trade(direction, asset_class, atr, entry_open, stop_initial, target
         "status": "closed", "outcome": outcome,
         "entry_open": round(entry, 6), "entry_price": round(fill, 6),   # entry_open=R/%-Basis, entry_price=Fill
         "exit_price": round(exit_price, 6), "stop_initial": round(stop_initial, 6),
-        "stop_final": round(stop, 6), "target": round(target, 6), "direction": direction,
+        "stop_final": round(stop_final, 6), "target": round(target, 6), "direction": direction,
         "brutto_r": round(brutto_r, 3), "netto_r": round(netto_r, 3),
         "gross_return_pct": round(gross_return_pct, 4), "fees_pct": round(fees_pct, 4),
         "slippage_pct": round(slippage_pct, 4), "net_return_pct": round(net_return_pct, 4),
         "mfe_r": round(mfe, 3), "mae_r": round(mae, 3), "ambiguous_intrabar": ambiguous,
         "be_moved": be_moved, "duration_bars": dur, "duration_days": round(dur * 4 / 24, 2),
     }
+
+
+def mark_to_market(direction, asset_class, atr, entry_open, stop_initial, target, exit_price,
+                   be_moved=False, mfe=0.0, mae=0.0, dur=0, stop_final=None, outcome="TEST_END"):
+    """Bewertet einen am Testende NOCH OFFENEN Trade zum letzten Schlusskurs (Mark-to-Market).
+    Nutzt exakt dieselben Kosten-/Prozentformeln wie ein regulaerer Exit (getrennt ausweisbar
+    ueber outcome=TEST_END). Gibt das Ergebnis-dict oder {'error': 'ZERO_RISK'}."""
+    long = direction == "LONG"
+    slip = SLIP_ATR_PER_SIDE * atr
+    fill = entry_open + slip if long else entry_open - slip
+    risk = abs(entry_open - stop_initial)
+    if risk <= 0:
+        return {"error": "ZERO_RISK"}
+    sf = stop_final if stop_final is not None else stop_initial
+    return _result_block(direction, asset_class, atr, entry_open, fill, risk, slip, stop_initial,
+                         sf, target or exit_price, exit_price, outcome, be_moved, mfe, mae, False, dur)
 
 
 @dataclass
@@ -139,6 +163,14 @@ class PaperTrade:
     result: dict = field(default_factory=dict)
     code_version: str = "engine-0.3"
     config_hash: str = ""
+    # --- ab Neustart 17.10.2026 (alle mit Default -> alte trades.json bleiben lesbar) ---
+    exit_mode: str = ""                                  # "" = klassisch (Stop/Ziel/BE) | "CPLUS"
+    safety_line: dict = field(default_factory=dict)      # {d0,p0,d1,p1}: Safety Line relativ zur Signalkerze (C+)
+    cplus: dict = field(default_factory=dict)            # persistenter C+-Zustand (Stufe, Schwelle, Ereignisse)
+    signal_end_time: str = ""                            # Schlusszeit der Signalkerze (UTC, ISO)
+    booked_entry: dict = field(default_factory=dict)     # theoretischer Einstieg (Open Folgekerze): {price,time}
+    realistic: dict = field(default_factory=dict)        # realistischer Einstieg = Kurs beim Versand
+    notif: dict = field(default_factory=dict)            # Zustellmarken {opened,closed} (Telegram)
 
 
 class PaperTradeStore:

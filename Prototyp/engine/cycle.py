@@ -9,9 +9,17 @@ Kerze nach dem Signal (kein rueckdatierter Fill).
 import time as _time
 import pandas as pd
 
+import numpy as np
+
 from . import tracker as T
 from . import variants as VAR
+from . import exit_cplus as XC
+from . import exit_d as XD
 from .ledger import make_variant_eval_id
+
+CPLUS_ID = VAR.CPLUS_ID
+D_ID = VAR.D_ID
+EXIT_MODES = {CPLUS_ID: "CPLUS", D_ID: "D"}
 
 
 def _accepted_variants(result):
@@ -42,7 +50,16 @@ def open_trades_for_accepted(result, be_map, state_reg, trade_store, now):
             symbol=symbol, asset_class=result["asset_class"], direction=result["direction"],
             signal_time=result["signal_time"], status="pending_fill",
             stop_initial=result["baseline_stop"], target=result["baseline_target"] or 0.0,
-            atr=result["atr"], line_sig=line_sig)
+            atr=result["atr"], line_sig=line_sig,
+            signal_end_time=result.get("signal_end_time", ""),
+            booked_entry={"signal_close": result.get("signal_close")})
+        if sid in EXIT_MODES:
+            # C+ / D: gleiche Einstiege wie Pro.1 (inkl. Ziel-Gate), aber eigener Ausstieg statt Stop/Ziel/BE
+            if not result.get("safety_line"):
+                continue
+            trade.exit_mode = EXIT_MODES[sid]
+            trade.safety_line = dict(result["safety_line"])
+            trade.cplus = (XD if trade.exit_mode == "D" else XC).new_state()     # persistenter Ausstiegszustand
         if trade.target <= 0:
             # kein Ziel -> nicht handelbar (waere REJECTED_RR bei aktivem Gate); hier nicht oeffnen
             continue
@@ -54,7 +71,7 @@ def open_trades_for_accepted(result, be_map, state_reg, trade_store, now):
     return opened
 
 
-def update_open_trades(symbol, compat, trade_store, state_reg, now):
+def update_open_trades(symbol, compat, trade_store, state_reg, now, next_open_fn=None):
     """Fuellt pending_fill-Trades (sobald die naechste Kerze existiert) und verfolgt offene Trades
     gegen die aktuellen Kerzen; schliesst sie bei Stop/Ziel/Break-even."""
     changed = 0
@@ -68,6 +85,9 @@ def update_open_trades(symbol, compat, trade_store, state_reg, now):
             continue                       # naechste Kerze noch nicht da -> bleibt pending_fill
         entry_idx = after.index[0]
         entry_open = float(compat["Open"].iloc[entry_idx])
+        if t.exit_mode in ("CPLUS", "D"):
+            changed += _update_cplus(t, compat, times, entry_idx, entry_open, state_reg, now, next_open_fn)
+            continue
         bars = [{"High": float(compat["High"].iloc[i]), "Low": float(compat["Low"].iloc[i]),
                  "Open": float(compat["Open"].iloc[i]), "Close": float(compat["Close"].iloc[i])}
                 for i in range(entry_idx, len(compat))]
@@ -91,7 +111,49 @@ def update_open_trades(symbol, compat, trade_store, state_reg, now):
     return changed
 
 
-def run_cycle(bars_by_symbol, results_by_symbol, be_map, state_reg, trade_store, now=None):
+def _update_cplus(t, compat, times, entry_idx, entry_open, state_reg, now, next_open_fn=None):
+    """C+-Trade: verarbeitet nur die NEUEN abgeschlossenen Kerzen (persistenter Zustand, strikt der Reihe nach).
+    Gibt 1 zurueck, wenn der Trade in diesem Aufruf geschlossen wurde."""
+    X = XD if t.exit_mode == "D" else XC                       # Ausstiegsmodul (C+ oder D); Zustand liegt in t.cplus
+    if not t.cplus:
+        t.cplus = X.new_state()
+    atr = float(t.atr)
+    risk = abs(entry_open - t.stop_initial)
+    t.entry_time = pd.Timestamp(compat["Time"].iloc[entry_idx]).isoformat()
+    t.entry_price = entry_open + T.SLIP_ATR_PER_SIDE * atr if t.direction == "LONG"         else entry_open - T.SLIP_ATR_PER_SIDE * atr
+    if risk <= 0 or not t.safety_line:
+        t.status = "open"; t.result = {"status": "open", "error": "ZERO_RISK_OR_NO_LINE"}
+        return 0
+    k = entry_idx - 1                                         # Signalkerze = Kerze vor der Einstiegskerze
+    line = XC.make_line_fn(t.safety_line, k)
+    cost = XC.cost_price_for(t.direction, t.asset_class, atr, entry_open)
+    X.advance(t.cplus, t.direction, list(times), compat["Open"].values, compat["High"].values,
+               compat["Low"].values, compat["Close"].values, line, entry_idx, entry_open, risk, atr, cost)
+    if t.cplus.get("pending") and next_open_fn is not None:
+        # Das Ausstiegssignal (Schluss jenseits der Schwelle) steht fest; der Ausstieg erfolgt zum OPEN der naechsten Kerze.
+        # Dieser Open ist bei Kerzenbeginn bekannt - nicht erst 4 h spaeter, wenn die Folgekerze abgeschlossen ist.
+        try:
+            nb = next_open_fn(t.symbol, t.cplus["pending"]["time"])
+        except Exception:
+            nb = None
+        if nb and nb.get("running") and nb.get("opened_at_start"):
+            X.execute_pending(t.cplus, nb["price"], nb["time"])
+    r = X.result_for_trade(t.cplus, t.direction, t.asset_class, atr, entry_open, t.stop_initial)
+    # aktuelle Schwellen fuer die naechste (laufende) Kerze - Anzeige in Meldung/Bericht
+    thr, net, who = X.current_levels(t.cplus, t.direction, line, len(compat), atr)
+    t.cplus["levels_next"] = {"threshold": thr, "net": net, "source": who}
+    if r.get("status") == "closed":
+        ex_ts = pd.Timestamp(t.cplus["exit"]["time"])
+        r["exit_time"] = ex_ts.isoformat()
+        r["closed_ts"] = float(ex_ts.timestamp())
+        t.status = "closed"; t.result = r
+        state_reg.get(t.strategy_id).close(t.symbol, now)
+        return 1
+    t.status = "open"; t.result = r
+    return 0
+
+
+def run_cycle(bars_by_symbol, results_by_symbol, be_map, state_reg, trade_store, now=None, next_open_fn=None):
     """Ein Zyklus ueber mehrere Instrumente:
     - `results_by_symbol`: je Symbol EIN Ergebnis-dict ODER eine LISTE von Ergebnis-dicts
       (mehrere nachgeholte Kerzen aus einer PC-Aus-Luecke; orchestrate.analyze_instrument_history).
@@ -104,7 +166,7 @@ def run_cycle(bars_by_symbol, results_by_symbol, be_map, state_reg, trade_store,
     before_active = {t.trade_id for t in trade_store.trades if t.status in ("open", "pending_fill")}
     summary = {"opened": 0, "closed": 0, "instruments": len(bars_by_symbol)}
     for symbol, compat in bars_by_symbol.items():
-        summary["closed"] += update_open_trades(symbol, compat, trade_store, state_reg, now)
+        summary["closed"] += update_open_trades(symbol, compat, trade_store, state_reg, now, next_open_fn)
     touched = set()
     for symbol, result in results_by_symbol.items():
         rlist = result if isinstance(result, list) else [result]
@@ -117,7 +179,7 @@ def run_cycle(bars_by_symbol, results_by_symbol, be_map, state_reg, trade_store,
     for symbol in touched:
         if symbol in bars_by_symbol:
             summary["closed"] += update_open_trades(symbol, bars_by_symbol[symbol],
-                                                    trade_store, state_reg, now)
+                                                    trade_store, state_reg, now, next_open_fn)
     # Neu geöffnete / geschlossene Trades dieses Zyklus (für Telegram-Alerts)
     summary["closed_trades"] = [t for t in trade_store.trades
                                 if t.status == "closed" and t.trade_id not in before_closed]

@@ -77,6 +77,12 @@ MAX_APEX_BARS = 180         # Keil-Regel (Nutzer 15.07.2026, verschaerft am selb
                             # KONVERGIEREN; ihr Schnittpunkt (Apex) muss innerhalb von
                             # 180 4h-Kerzen (~30 Handelstage / ~6 Wochen) vor uns liegen.
                             # Parallele oder quasi-parallele Linien sind KEIN Setup.
+MAX_SAFETY_TAP_AGE_MONTHS = 4  # Nutzer-Regel 17.08.2026: Die Safety-Line darf nur auf Taps
+                            # beruhen, die NICHT aelter als 4 Monate (Kalenderzeit) sind.
+                            # Ein Kandidat, dessen aeltester (erster) Tap weiter zurueckliegt,
+                            # wird verworfen - kein Verankern an halbjahresalter Struktur.
+                            # Zeitbasiert (df["Time"]), damit Wochenenden/Feiertage bei
+                            # Futures/Aktien nicht als "Alter" mitzaehlen.
 
 @dataclass
 class Line:
@@ -180,12 +186,18 @@ def converges(action, safety, ref_i):
 def pick_safety(action, opp_lines, df, a):
     """NEU: naechstgelegene Gegenlinie am aktuellen Rand (statt Best-Score).
     Bedingungen: >=2 Taps, korrekte Seite, intakt, KONVERGENT (Keil),
-    letzter Tap moeglichst jung."""
+    aeltester Tap <= 4 Monate (Nutzer-Regel 17.08.2026), letzter Tap moeglichst jung."""
     n = len(df); ref_i = n - 1
     av = action.value_at(ref_i)
+    # Nutzer-Regel 17.08.2026: Safety-Taps duerfen max. 4 Monate alt sein (zeitbasiert).
+    times = pd.to_datetime(df["Time"]) if "Time" in getattr(df, "columns", []) else None
+    tap_cutoff = (times.iloc[ref_i] - pd.DateOffset(months=MAX_SAFETY_TAP_AGE_MONTHS)) \
+                 if times is not None else None
     best, best_d = None, None
     for ln in opp_lines:
         if len(ln.taps) < MIN_TAPS_SAFETY: continue
+        if tap_cutoff is not None and times.iloc[ln.taps[0]] < tap_cutoff:
+            continue                       # aeltester Tap > 4 Monate -> Safety zu alt, verworfen
         if ln.breaking_bar > 0: continue   # WICHTIG: Safety muss intakt sein - darf keine Kerzen durchkreuzen (Nutzer-Regel 13.07.2026)
         sv = ln.value_at(ref_i)
         if action.kind == "support" and sv <= av: continue   # Resistance muss darueber liegen

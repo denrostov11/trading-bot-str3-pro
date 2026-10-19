@@ -1,0 +1,28 @@
+{
+ "trade_pdf": {
+  "enabled": true,
+  "timeout_s": 90,
+  "png_dpi": 220
+ },
+ "prewarn": {
+  "enabled": true,
+  "minutes_before": [
+   30,
+   15
+  ],
+  "night_quiet": {
+   "enabled": true,
+   "from": "23:00",
+   "to": "07:00"
+  },
+  "groups": [
+   "Str.3 Pro.1",
+   "Str.3 Pro.3",
+   "Str.3 C+",
+   "Str.3 D"
+  ]
+ },
+ "cycle": {
+  "close_delay_s": 90
+ }
+}
